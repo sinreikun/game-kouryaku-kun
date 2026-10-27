@@ -164,6 +164,56 @@ int main() {
             auto c2 = comps[1]; c2.version = "99.0.0"; CHECK(CheckComponent(rt, c2).health == Health::Broken);
         }
     }
+
+    // ---- 本体更新マニフェスト ----
+    {
+        AppUpdateManifest m; std::string err;
+        std::string good = R"({"protocol":1,"version":"0.33.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":12345,"url":"https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.33.0/app-update-0.33.0.zip"})";
+        CHECK(ParseAppUpdateManifest(good, m, err));
+        CHECK(m.protocol == 1 && m.version == "0.33.0" && m.bytes == 12345 && m.sha256.size() == 64);
+        CHECK(IsAllowedAppUpdateUrl(m.url));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":2,"version":"0.33.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":1,"url":"https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.33.0/x.zip"})", m, err));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":1,"version":"0.33","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":1,"url":"https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.33.0/x.zip"})", m, err));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":1,"version":"0.33.0","sha256":"zz","bytes":1,"url":"https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.33.0/x.zip"})", m, err));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":1,"version":"0.33.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":0,"url":"https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.33.0/x.zip"})", m, err));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":1,"version":"0.33.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":1,"url":"http://github.com/sinreikun/game-kouryaku-kun/x.zip"})", m, err));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":1,"version":"0.33.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":1,"url":"https://evil.example/x.zip"})", m, err));
+        CHECK(!ParseAppUpdateManifest(R"({"protocol":1,"version":"0.33.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":1,"url":"https://github.com/other/repo/releases/download/v1/x.zip"})", m, err));
+        CHECK(IsAllowedAppUpdateUrl("https://objects.githubusercontent.com/github-production-release-asset/1/2"));
+        CHECK(IsAllowedAppUpdateUrl("https://release-assets.githubusercontent.com/github-production-release-asset/1/2"));
+        CHECK(!IsAllowedAppUpdateUrl("https://githubusercontent.com/evil"));
+        CHECK(CompareVersions("0.33.0", "0.32.9") == 1);
+        CHECK(CompareVersions("0.32.9", "0.33.0") == -1);
+        CHECK(CompareVersions("0.33.0", "0.33.0") == 0);
+        CHECK(CompareVersions("0.33.0", "0.33.0.0") == 0);
+        CHECK(CompareVersions("1.0.0", "1.0.0-beta") == -2);
+        CHECK(CompareVersions("bad", "1.0.0") == -2);
+    }
+    // 原子的な app 入れ替え
+    {
+        fs::path base = tmp / "appswap"; fs::create_directories(base / "stage");
+        FILE* f = fopen((base / "stage" / "GameKouryakuKun.exe").c_str(), "wb"); fwrite("new", 1, 3, f); fclose(f);
+        FILE* f2 = fopen((base / "stage" / "a.dll").c_str(), "wb"); fwrite("d", 1, 1, f2); fclose(f2);
+        fs::create_directories(base / "app");
+        FILE* f3 = fopen((base / "app" / "GameKouryakuKun.exe").c_str(), "wb"); fwrite("old", 1, 3, f3); fclose(f3);
+        fs::create_directories(base / "data"); FILE* f4 = fopen((base / "data" / "keep.txt").c_str(), "wb"); fwrite("k", 1, 1, f4); fclose(f4);
+        auto sw = SwapAppDir(base / "stage", base / "app", base / "app.old");
+        CHECK(sw.ok);
+        CHECK(fs::exists(base / "app" / "GameKouryakuKun.exe"));
+        CHECK(ReadAll(base / "app" / "GameKouryakuKun.exe") == "new");
+        CHECK(fs::exists(base / "data" / "keep.txt") && ReadAll(base / "data" / "keep.txt") == "k");
+        CHECK(!fs::exists(base / "stage"));
+        AppUpdateManifest m; m.version = "0.33.0"; m.sha256 = std::string(64, 'a');
+        CHECK(WriteInstalledApp(base / "app", m, {{"GameKouryakuKun.exe", 3, 0}, {"a.dll", 1, 0}}, "t"));
+        std::string ver, sha;
+        CHECK(ReadInstalledApp(base / "app", ver, sha) && ver == "0.33.0" && sha == m.sha256);
+        // exe 欠けるステージは拒否
+        fs::create_directories(base / "stage2");
+        FILE* f5 = fopen((base / "stage2" / "only.dll").c_str(), "wb"); fwrite("x", 1, 1, f5); fclose(f5);
+        auto sw2 = SwapAppDir(base / "stage2", base / "app", base / "app.old");
+        CHECK(!sw2.ok);
+    }
+
     fs::remove_all(tmp);
     printf("launcher core tests: %d passed, %d failed\n", passes, fails);
     return fails ? 1 : 0;

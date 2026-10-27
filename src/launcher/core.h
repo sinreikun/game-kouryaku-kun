@@ -79,4 +79,34 @@ std::string ToLower(std::string s);
 std::string ReadAll(const fs::path& p);
 bool WriteAllAtomic(const fs::path& p, const std::string& data);
 
+// ---- 本体（app\）の自動更新マニフェスト ----
+// release/latest.json（GitHub raw）の最小 JSON。protocol / version / sha256 / bytes / url
+struct AppUpdateManifest {
+    int protocol = 0;
+    std::string version;   // 例: 0.33.0
+    std::string sha256;    // 小文字 hex 64
+    uint64_t bytes = 0;
+    std::string url;       // https のみ・許可ホストのみ
+};
+// 厳密検証。失敗時は error に日本語の理由。成功時 out を埋める
+bool ParseAppUpdateManifest(const std::string& json, AppUpdateManifest& out, std::string& error);
+// セマンティック版の比較。a>b → 1, a==b → 0, a<b → -1。形式不正なら -2
+int CompareVersions(const std::string& a, const std::string& b);
+// 更新 zip の URL として許可するか（https + 当リポジトリの GitHub Releases / objects）
+bool IsAllowedAppUpdateUrl(const std::string& url);
+// app\.gkk\app.lock のパス
+fs::path AppLockPath(const fs::path& appDir);
+// 導入記録から版と sha256 を読む。無ければ false
+bool ReadInstalledApp(const fs::path& appDir, std::string& version, std::string& sha256);
+// ステージ先へ展開済みのファイル一覧から app.lock を書く
+bool WriteInstalledApp(const fs::path& appDir, const AppUpdateManifest& m, const std::vector<InstalledFile>& files, const std::string& installedAt);
+// appDir の中身を空にしてから zip を展開（パス検査付き）。成功時 files を返す
+ExtractResult ExtractAppZip(const fs::path& zip, const fs::path& appDir,
+                            const std::function<void(uint64_t, uint64_t)>& progress = {},
+                            const std::function<bool()>& cancel = {});
+// stageDir（中身は新しい app）を destAppDir へ原子的に入れ替える。旧 dest は oldAppDir へ退避（あれば）。
+// data\ には触れない。成功後に oldAppDir の削除を試す（失敗しても ok）
+struct SwapAppResult { bool ok = false; std::string error; };
+SwapAppResult SwapAppDir(const fs::path& stageDir, const fs::path& destAppDir, const fs::path& oldAppDir);
+
 }  // namespace gkk

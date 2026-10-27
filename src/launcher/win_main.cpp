@@ -1,11 +1,13 @@
-// ゲーム攻略くん.exe — 小さなネイティブ起動ツール（.NET 不要）。
-// 1) {ホーム}\runtime\ に .NET 8 Runtime / Desktop Runtime（win-x64）が正しく入っているか導入記録で確認
+// ゲーム攻略くん.exe — 小さなネイティブ起動ツール（.NET 不要）。安定版（本体の更新では置き換えない）。
+// 0) 公開リポジトリの release/latest.json を見て、必要なら本体（app\）を GitHub Releases から取得・照合・原子的に入れ替え
+//    （ネットワーク失敗時は既存の app\ があればそれで起動。data\ は触らない。ランチャー自身は自動更新しない）
+// 1) {ホーム}\runtime\ に .NET Runtime / Desktop Runtime（win-x64）が正しく入っているか導入記録で確認
 // 2) 無い・壊れている部品だけを公式配布元から zip でダウンロード（途中から再開可）→ SHA-512 と SHA-256 を照合 → 展開
 //    （管理者権限不要。システムには何もインストールしない。レジストリも触らない）
 // 3) DOTNET_ROOT 等を設定して {ホーム}\app\GameKouryakuKun.exe を起動
-// 4) 版を上げたときは、新しい版の導入がすべて済んでから、旧版だけにあったファイルを削除（使用中なら次回に再試行）
-// 引数: --verify（CRC32 まで再照合）/ --repair（強制再導入）/ --check（確認だけ）/
-//       --cleanup（旧版の片付けだけ行って結果を表示）/ それ以外は本体へ渡す
+// 4) ランタイムの版を上げたときは、新しい版の導入がすべて済んでから、旧版だけにあったファイルを削除（使用中なら次回に再試行）
+// 引数: --verify（CRC32 まで再照合）/ --repair（本体・ランタイムを強制再導入）/ --check（確認だけ）/
+//       --cleanup（旧版ランタイムの片付けだけ）/ --offline（本体の更新確認をしない）/ それ以外は本体へ渡す
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
 #define UNICODE
@@ -125,7 +127,7 @@ static void CreateProgressWindow(HINSTANCE inst) {
     RECT rc{0, 0, S(480), S(150)}; DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&rc, style, FALSE);
     int w = rc.right - rc.left, hgt = rc.bottom - rc.top;
-    g_wnd = CreateWindowW(L"GkkLauncher", L"ゲーム攻略くん - 初回準備", style, (GetSystemMetrics(SM_CXSCREEN) - w) / 2,
+    g_wnd = CreateWindowW(L"GkkLauncher", L"ゲーム攻略くん - 準備・更新", style, (GetSystemMetrics(SM_CXSCREEN) - w) / 2,
                           (GetSystemMetrics(SM_CYSCREEN) - hgt) / 2, w, hgt, nullptr, nullptr, inst, nullptr);
     g_title = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, S(16), S(14), S(448), S(20), g_wnd, nullptr, inst, nullptr);
     g_bar = CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH, S(16), S(40), S(448), S(20), g_wnd, nullptr, inst, nullptr);
@@ -214,6 +216,223 @@ static DlResult DownloadOnce(const std::wstring& url, const fs::path& part, uint
         else r.ok = true;
     }
     return r;
+}
+
+// ---------------- 本体（app\）の自動更新 ----------------
+static const wchar_t* kLatestManifestUrl = L"https://raw.githubusercontent.com/sinreikun/game-kouryaku-kun/main/release/latest.json";
+static const uint64_t kMaxManifestBytes = 16384;
+
+// サイズ未知（上限あり）の小さなファイル用。EOF で成功。exactExpected>0 ならそのサイズ必須
+static DlResult DownloadBounded(const std::wstring& url, const fs::path& dest, uint64_t maxBytes, uint64_t exactExpected, const std::string& label) {
+    DlResult r;
+    std::error_code ec;
+    fs::remove(dest, ec);
+    URL_COMPONENTS uc{sizeof uc}; wchar_t host[256], path[2048];
+    uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS) { r.fatal = true; r.error = "URL が不正（https のみ許可）"; return r; }
+    HINTERNET s = WinHttpOpen(L"GameKouryakuKun-Launcher/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) s = WinHttpOpen(L"GameKouryakuKun-Launcher/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) { r.error = "通信の初期化に失敗: " + WinErr(GetLastError()); return r; }
+    WinHttpSetTimeouts(s, 15000, 15000, 30000, 30000);
+    DWORD protos = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | 0x00002000;
+    if (!WinHttpSetOption(s, WINHTTP_OPTION_SECURE_PROTOCOLS, &protos, sizeof protos)) {
+        protos = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2; WinHttpSetOption(s, WINHTTP_OPTION_SECURE_PROTOCOLS, &protos, sizeof protos);
+    }
+    HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+    HINTERNET q = c ? WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    auto cleanup = [&] { if (q) WinHttpCloseHandle(q); if (c) WinHttpCloseHandle(c); WinHttpCloseHandle(s); };
+    if (!q) { r.error = "接続に失敗: " + WinErr(GetLastError()); cleanup(); return r; }
+    if (!WinHttpSendRequest(q, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(q, nullptr)) { r.error = "通信に失敗: " + WinErr(GetLastError()); cleanup(); return r; }
+    DWORD status = 0, sz = sizeof status;
+    WinHttpQueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+    if (status != 200) { r.error = "サーバーの応答 HTTP " + std::to_string(status); if (status == 404 || status == 403 || status == 410) r.fatal = true; cleanup(); return r; }
+    FILE* f = _wfopen(dest.wstring().c_str(), L"wb");
+    if (!f) { r.fatal = true; r.error = "保存先に書き込めません"; cleanup(); return r; }
+    uint64_t got = 0; std::vector<char> buf(64 * 1024);
+    for (;;) {
+        if (g_prog.cancel) { r.cancelled = true; r.error = "中止しました"; break; }
+        DWORD avail = 0;
+        if (!WinHttpQueryDataAvailable(q, &avail)) { r.error = "受信が途切れました: " + WinErr(GetLastError()); break; }
+        if (avail == 0) break;
+        DWORD rd = 0;
+        if (!WinHttpReadData(q, buf.data(), (DWORD)std::min<size_t>(avail, buf.size()), &rd) || rd == 0) { if (rd == 0) break; r.error = "受信エラー"; break; }
+        if (fwrite(buf.data(), 1, rd, f) != rd) { r.fatal = true; r.error = "書き込みエラー"; break; }
+        got += rd;
+        if (got > maxBytes) { r.error = "想定より大きいデータを受信"; break; }
+        if (!label.empty()) g_prog.SetStatus(label + "\n受信中: " + std::to_string(got) + " バイト", 0.05);
+    }
+    fclose(f); cleanup();
+    if (!r.error.empty()) { fs::remove(dest, ec); return r; }
+    if (exactExpected > 0 && got != exactExpected) { fs::remove(dest, ec); r.error = "サイズが一致しません"; return r; }
+    if (got == 0) { fs::remove(dest, ec); r.error = "空の応答です"; return r; }
+    r.ok = true; return r;
+}
+
+struct AppUpdateResult {
+    bool ok = false;          // 起動してよい（更新成功 or 既存で可）
+    bool cancelled = false;
+    bool updated = false;
+    bool offlineFallback = false;
+    std::string version;      // 使う本体の版
+    std::string error;        // 致命（本体なし）または警告
+    std::string report;       // --check 用
+};
+
+static AppUpdateResult EnsureAppUpdated(bool repair, bool offline, bool apply) {
+    AppUpdateResult res;
+    std::error_code ec;
+    fs::path appDir = g_root / "app";
+    fs::path appExe = appDir / L"GameKouryakuKun.exe";
+    std::string localVer, localSha;
+    bool haveLock = ReadInstalledApp(appDir, localVer, localSha);
+    bool haveExe = fs::exists(appExe, ec);
+    if (haveLock) res.version = localVer;
+    else if (haveExe) res.version = "(未記録)";
+    else res.version = "(なし)";
+
+    if (offline) {
+        res.report = "本体: " + res.version + "（--offline: 更新確認なし）\n";
+        if (haveExe) { res.ok = true; return res; }
+        res.error = "本体がありません。ネット接続のある環境で起動するか、配布パッケージを入れ直してください。";
+        return res;
+    }
+
+    g_prog.Set("本体の更新を確認しています", "最新版の情報を取得中…", 0.02);
+    fs::path updDir = g_writable / "updates";
+    fs::create_directories(updDir, ec);
+    fs::path manPart = updDir / "latest.json.part";
+    fs::path manPath = updDir / "latest.json";
+    auto dl = DownloadBounded(kLatestManifestUrl, manPart, kMaxManifestBytes, 0, "更新情報");
+    if (dl.cancelled) { res.cancelled = true; res.error = dl.error; return res; }
+    if (!dl.ok) {
+        Log("app-update manifest failed: " + dl.error);
+        res.report = "本体: " + res.version + "（更新確認失敗: " + dl.error + "）\n";
+        if (haveExe) {
+            res.ok = true; res.offlineFallback = true; res.error = dl.error;
+            Log("app-update: using existing app after manifest failure");
+            return res;
+        }
+        res.error = "本体がなく、更新情報も取得できませんでした。\n" + dl.error + "\nネット接続を確認して再起動してください。";
+        return res;
+    }
+    fs::remove(manPath, ec); fs::rename(manPart, manPath, ec);
+    std::string manText = ReadAll(manPath);
+    AppUpdateManifest man; std::string perr;
+    if (!ParseAppUpdateManifest(manText, man, perr)) {
+        Log("app-update bad manifest: " + perr);
+        res.report = "本体: " + res.version + "（更新情報不正: " + perr + "）\n";
+        if (haveExe) { res.ok = true; res.offlineFallback = true; res.error = perr; return res; }
+        res.error = "更新情報が不正で、本体もありません: " + perr;
+        return res;
+    }
+    Log("app-update remote version=" + man.version + " bytes=" + std::to_string(man.bytes));
+
+    bool need = repair || !haveExe || !haveLock;
+    if (!need) {
+        int cmp = CompareVersions(localVer, man.version);
+        if (cmp == -2) need = true;
+        else if (cmp < 0) need = true;
+        else if (ToLower(localSha) != man.sha256) need = true;  // 同じ版でもハッシュ不一致なら取り直す
+    }
+    res.report = "本体 導入: " + res.version + " / 公開: " + man.version + (need ? (apply ? " → 更新します" : " → 更新あり") : "（最新）") + "\n";
+    if (!need) { res.ok = true; res.version = haveLock ? localVer : man.version; g_prog.SetStatus("本体は最新です（v" + man.version + "）", 0.1); return res; }
+    if (!apply) {
+        res.ok = haveExe;
+        if (!haveExe) res.error = "本体がありません（更新が必要です）";
+        return res;
+    }
+
+    g_prog.Set("本体を更新しています", "v" + man.version + " をダウンロード中…", 0.1);
+    fs::path zip = updDir / ("app-update-" + man.version + ".zip");
+    fs::path part = zip; part += ".part";
+    // 既存 zip が一致すれば再利用
+    bool haveZip = false;
+    if (fs::exists(zip, ec) && fs::file_size(zip, ec) == man.bytes) {
+        std::string s256, s512;
+        if (HashFile(zip, s256, s512) && s256 == man.sha256) haveZip = true;
+        else fs::remove(zip, ec);
+    } else fs::remove(zip, ec);
+
+    if (!haveZip) {
+        std::string lastErr;
+        for (int attempt = 1; attempt <= 4 && !haveZip; attempt++) {
+            Log("app-update download attempt=" + std::to_string(attempt) + " url=" + man.url);
+            auto d = DownloadOnce(W(man.url), part, man.bytes, "本体 v" + man.version);
+            if (d.cancelled) { res.cancelled = true; res.error = d.error; return res; }
+            if (d.ok) {
+                fs::remove(zip, ec); fs::rename(part, zip, ec);
+                if (ec) { lastErr = "ダウンロードしたファイルを移動できません"; break; }
+                haveZip = true; break;
+            }
+            lastErr = d.error; Log("app-update download failed: " + d.error);
+            if (d.fatal) break;
+            for (int w = attempt * 2; w > 0 && !g_prog.cancel; w--) {
+                g_prog.SetStatus("本体 v" + man.version + "\n" + lastErr + " — " + std::to_string(w) + " 秒後に再試行", 0.15);
+                Sleep(1000);
+            }
+            if (g_prog.cancel) { res.cancelled = true; res.error = "中止しました"; return res; }
+        }
+        if (!haveZip) {
+            if (haveExe) {
+                res.ok = true; res.offlineFallback = true; res.error = lastErr;
+                Log("app-update: keep existing after download failure");
+                return res;
+            }
+            res.error = "本体をダウンロードできませんでした: " + lastErr;
+            return res;
+        }
+    }
+
+    g_prog.SetStatus("本体 v" + man.version + "\n改ざん・破損がないか確認中（SHA-256）", 0.75);
+    std::string s256, s512;
+    if (!HashFile(zip, s256, s512, [&](uint64_t d, uint64_t t) {
+            g_prog.SetStatus("本体 v" + man.version + "\n改ざん・破損がないか確認中（SHA-256）", 0.75 + 0.05 * d / (t ? t : 1));
+        }) || s256 != man.sha256) {
+        fs::remove(zip, ec);
+        if (haveExe) { res.ok = true; res.offlineFallback = true; res.error = "ハッシュ不一致"; return res; }
+        res.error = "本体パッケージの照合に失敗しました（ハッシュ不一致）";
+        return res;
+    }
+
+    fs::path stage = g_writable / "app.new";
+    fs::path oldApp = g_writable / "app.old";
+    fs::remove_all(stage, ec);
+    fs::create_directories(stage, ec);
+    g_prog.SetStatus("本体 v" + man.version + "\n展開中…", 0.82);
+    auto ex = ExtractAppZip(zip, stage,
+                            [&](uint64_t d, uint64_t t) { g_prog.SetStatus("本体 v" + man.version + "\n展開中: " + Mb(d) + " / " + Mb(t), 0.82 + 0.12 * d / (t ? t : 1)); },
+                            [] { return g_prog.cancel.load(); });
+    if (!ex.ok) {
+        fs::remove_all(stage, ec);
+        if (g_prog.cancel) { res.cancelled = true; res.error = "中止しました"; return res; }
+        if (haveExe) { res.ok = true; res.offlineFallback = true; res.error = ex.error; return res; }
+        res.error = "本体の展開に失敗: " + ex.error;
+        return res;
+    }
+    if (!WriteInstalledApp(stage, man, ex.files, Now())) {
+        fs::remove_all(stage, ec);
+        res.error = "本体の導入記録を書けません";
+        return res;
+    }
+    // アプリ配下へ原子的に入れ替え（g_root\app）。書き込み先が別ならコピーでは足りないので、
+    // 常に g_root\app を差し替える（起動ツールと同じフォルダ構成を保つ）
+    fs::path destApp = g_root / "app";
+    fs::path destOld = g_root / "app.old";
+    // Program Files などで g_root に書けない場合は失敗 → 既存があればフォールバック
+    auto sw = SwapAppDir(stage, destApp, destOld);
+    if (!sw.ok) {
+        fs::remove_all(stage, ec);
+        Log("app-update swap failed: " + sw.error);
+        if (haveExe) { res.ok = true; res.offlineFallback = true; res.error = sw.error; return res; }
+        res.error = "本体の入れ替えに失敗: " + sw.error;
+        return res;
+    }
+    fs::remove(zip, ec);
+    Log("app-update installed " + man.version + " files=" + std::to_string(ex.files.size()));
+    res.ok = true; res.updated = true; res.version = man.version;
+    g_prog.SetStatus("本体を v" + man.version + " に更新しました", 0.95);
+    return res;
 }
 
 // ---------------- 部品の導入 ----------------
@@ -323,28 +542,82 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     }
     g_dataRoot = g_writable == g_root ? g_root / "data" : g_writable;
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    bool verify = false, repair = false, checkOnly = false, cleanupOnly = false; std::vector<std::wstring> pass;
+    bool verify = false, repair = false, checkOnly = false, cleanupOnly = false, offline = false; std::vector<std::wstring> pass;
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
         if (a == L"--verify") verify = true;
-        else if (a == L"--repair") repair = true; else if (a == L"--check") checkOnly = true; else if (a == L"--cleanup") cleanupOnly = true;
+        else if (a == L"--repair") repair = true;
+        else if (a == L"--check") checkOnly = true;
+        else if (a == L"--cleanup") cleanupOnly = true;
+        else if (a == L"--offline") offline = true;
         else pass.push_back(a);
     }
-    Log("start root=" + U(g_root.wstring()) + (g_writable != g_root ? " writable=" + U(g_writable.wstring()) : std::string()) + (verify ? " --verify" : "") + (repair ? " --repair" : "") + (checkOnly ? " --check" : "") + (cleanupOnly ? " --cleanup" : ""));
+    Log("start root=" + U(g_root.wstring()) + (g_writable != g_root ? " writable=" + U(g_writable.wstring()) : std::string())
+        + (verify ? " --verify" : "") + (repair ? " --repair" : "") + (checkOnly ? " --check" : "")
+        + (cleanupOnly ? " --cleanup" : "") + (offline ? " --offline" : ""));
 
-    fs::path appExe = g_root / "app" / L"GameKouryakuKun.exe";
     std::error_code ec;
-    if (!fs::exists(appExe, ec)) { Fail("本体が見つかりません: " + U(appExe.wstring()) + "\nzip の中身をフォルダごと展開してください。"); return 2; }
-
     fs::path runtimeDir = g_writable / fs::u8path(kRuntimeDir);
     auto comps = EmbeddedComponents();
 
-    // 同時に2つのランチャーが導入しないように
+    // 同時に2つのランチャーが導入・更新しないように
     HANDLE mtx = CreateMutexW(nullptr, FALSE, L"Local\\GameKouryakuKun.Launcher.Runtime");
     if (mtx) WaitForSingleObject(mtx, INFINITE);
 
+    // ---- 本体の更新確認（ランタイムより先。ダウンロード自体に .NET は不要）----
+    AppUpdateResult appUp;
+    bool progressShown = false;
+    auto ensureProgress = [&] {
+        if (!progressShown) { CreateProgressWindow(inst); progressShown = true; }
+    };
+    if (!cleanupOnly) {
+        // --check でもネットで版を確認する（--offline ならローカルだけ）
+        if (!checkOnly || !offline) ensureProgress();
+        if (checkOnly && offline) {
+            std::string v, s; bool have = ReadInstalledApp(g_root / "app", v, s);
+            appUp.ok = fs::exists(g_root / "app" / L"GameKouryakuKun.exe", ec);
+            appUp.version = have ? v : (appUp.ok ? "(未記録)" : "(なし)");
+            appUp.report = "本体: " + appUp.version + "（--offline）\n";
+        } else {
+            g_prog.cancel = false; g_workerDone = false;
+            if (progressShown) EnableWindow(g_cancel, TRUE);
+            std::thread worker([&] {
+                appUp = EnsureAppUpdated(repair, offline, !checkOnly);
+                if (progressShown) {
+                    PostMessageW(g_wnd, WM_TIMER, TIMER_ID, 0);
+                    PostMessageW(g_wnd, WM_WORKER_DONE, 0, 0);
+                } else g_workerDone = true;
+            });
+            if (progressShown) {
+                MSG msg;
+                while (!g_workerDone && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+                    if (!IsDialogMessageW(g_wnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+                }
+            }
+            worker.join();
+            g_workerDone = false;
+        }
+        if (appUp.cancelled) { Log("app-update cancelled"); if (mtx) ReleaseMutex(mtx); if (progressShown) DestroyWindow(g_wnd); return 3; }
+        if (!appUp.ok) {
+            if (mtx) ReleaseMutex(mtx);
+            if (progressShown) DestroyWindow(g_wnd);
+            Fail(appUp.error.empty() ? "本体を用意できませんでした。" : appUp.error);
+            return 2;
+        }
+        if (appUp.offlineFallback && !appUp.error.empty())
+            Log("app-update warning (using existing): " + appUp.error);
+    }
+
+    fs::path appExe = g_root / "app" / L"GameKouryakuKun.exe";
+    if (!fs::exists(appExe, ec)) {
+        if (mtx) ReleaseMutex(mtx);
+        if (progressShown) DestroyWindow(g_wnd);
+        Fail("本体が見つかりません: " + U(appExe.wstring()));
+        return 2;
+    }
+
     std::vector<size_t> need;
-    std::string report;
+    std::string report = appUp.report;
     for (size_t i = 0; i < comps.size(); i++) {
         auto h = CheckComponent(runtimeDir, comps[i], verify);
         Log("check " + comps[i].id + " " + comps[i].version + ": " + h.detail);
@@ -358,17 +631,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         if (!need.empty()) msg = "新しい版の .NET がまだ揃っていないため、旧版は消しません（先に通常どおり起動してください）。\n\n" + report;
         else { auto cr = CleanupRetired(runtimeDir); Log("cleanup: " + cr.detail); msg = cr.detail; }
         if (mtx) ReleaseMutex(mtx);
+        if (progressShown) DestroyWindow(g_wnd);
         MessageBoxW(nullptr, W(msg).c_str(), L"ゲーム攻略くん - 旧版の片付け", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
     if (checkOnly) {
         if (mtx) ReleaseMutex(mtx);
-        MessageBoxW(nullptr, W(report + "\n場所: " + U(runtimeDir.wstring())).c_str(), L"ゲーム攻略くん - ランタイム確認", MB_OK | (need.empty() ? MB_ICONINFORMATION : MB_ICONWARNING));
-        return need.empty() ? 0 : 1;
+        if (progressShown) DestroyWindow(g_wnd);
+        bool appOk = fs::exists(appExe, ec);
+        MessageBoxW(nullptr, W(report + "\n場所: " + U(runtimeDir.wstring())).c_str(), L"ゲーム攻略くん - 確認",
+                    MB_OK | ((need.empty() && appOk) ? MB_ICONINFORMATION : MB_ICONWARNING));
+        return (need.empty() && appOk) ? 0 : 1;
     }
 
     if (!need.empty()) {
-        CreateProgressWindow(inst);
+        ensureProgress();
         for (;;) {
             InstallResult result; result.ok = true;
             g_prog.cancel = false; g_workerDone = false; EnableWindow(g_cancel, TRUE);
@@ -394,9 +671,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             for (size_t i = 0; i < comps.size(); i++) if (CheckComponent(runtimeDir, comps[i]).health != Health::Ok) need.push_back(i);
             if (need.empty()) break;
         }
-        DestroyWindow(g_wnd);
+        DestroyWindow(g_wnd); progressShown = false;
         MSG msg; while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         fs::remove(g_writable / "runtime-download", ec);  // 空なら消える
+    } else if (progressShown) {
+        DestroyWindow(g_wnd); progressShown = false;
+        MSG msg; while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
     }
     // 全部品が正常なときだけ旧版を片付ける（新しい版が使える状態を確かめてから消す）
     if (!RetiredLocks(runtimeDir).empty()) {

@@ -63,3 +63,6 @@ secrets/
 
 # phase1 build tree (launcher is built from src/launcher)
 phase1/launcher/
+
+# App update zips staged locally (latest.json is committed)
+release/*.zip

@@ -49,6 +49,10 @@ Linux 上ではユニットテストの一部とコアは動かせますが、WP
 
 配布用の一連の publish は `src/build.sh`（出力はローカルの `phase1/` / `dist/`。これらは `.gitignore` 済み）です。
 
+**利用者向け:** 初回だけ [Releases](https://github.com/sinreikun/game-kouryaku-kun/releases) のブートストラップ zip を展開し、`ゲーム攻略くん.exe` を起動してください。以降は同じ exe が `release/latest.json` を見て本体を自動更新します（詳細は `src/README.md` の「自動更新」）。
+
+**開発者向け公開:** `src/build.sh` → `tools/publish_release.sh`（GitHub Releases + `release/latest.json` を main へ）。
+
 ## ライセンス
 
 MIT（`LICENSE`）。サードパーティ部品（例: launcher 同梱の miniz）は各ディレクトリの LICENSE を参照してください。

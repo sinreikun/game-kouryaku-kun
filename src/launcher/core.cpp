@@ -361,4 +361,196 @@ bool WriteAllAtomic(const fs::path& p, const std::string& data) {
     return !ec;
 }
 
+// ================= 本体更新マニフェスト =================
+
+int CompareVersions(const std::string& a, const std::string& b) {
+    auto parse = [](const std::string& v, std::vector<int>& parts) -> bool {
+        size_t i = 0;
+        while (i < v.size()) {
+            size_t j = i;
+            while (j < v.size() && v[j] >= '0' && v[j] <= '9') j++;
+            if (j == i) return false;
+            parts.push_back(std::stoi(v.substr(i, j - i)));
+            if (j == v.size()) return true;
+            if (v[j] != '.') return false;
+            i = j + 1;
+            if (i >= v.size()) return false;  // trailing dot
+        }
+        return !parts.empty();
+    };
+    std::vector<int> pa, pb;
+    if (!parse(a, pa) || !parse(b, pb)) return -2;
+    size_t n = std::max(pa.size(), pb.size());
+    pa.resize(n, 0); pb.resize(n, 0);
+    for (size_t i = 0; i < n; i++) {
+        if (pa[i] > pb[i]) return 1;
+        if (pa[i] < pb[i]) return -1;
+    }
+    return 0;
+}
+
+bool IsAllowedAppUpdateUrl(const std::string& url) {
+    auto low = ToLower(url);
+    if (low.rfind("https://", 0) != 0) return false;
+    // github.com/sinreikun/game-kouryaku-kun/...
+    const char* ok1 = "https://github.com/sinreikun/game-kouryaku-kun/";
+    const char* ok2 = "https://objects.githubusercontent.com/";
+    const char* ok3 = "https://release-assets.githubusercontent.com/";
+    if (low.rfind(ok1, 0) == 0) return true;
+    if (low.rfind(ok2, 0) == 0) return true;
+    if (low.rfind(ok3, 0) == 0) return true;
+    return false;
+}
+
+static bool JsonFindString(const std::string& json, const char* key, std::string& out) {
+    // 最小パーサ: "key"\s*:\s*"value"（エスケープは \\ と \" のみ）
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = 0;
+    while ((p = json.find(pat, p)) != std::string::npos) {
+        size_t c = p + pat.size();
+        while (c < json.size() && (json[c] == ' ' || json[c] == '\t' || json[c] == '\r' || json[c] == '\n')) c++;
+        if (c >= json.size() || json[c] != ':') { p++; continue; }
+        c++;
+        while (c < json.size() && (json[c] == ' ' || json[c] == '\t' || json[c] == '\r' || json[c] == '\n')) c++;
+        if (c >= json.size() || json[c] != '"') return false;
+        c++;
+        std::string v;
+        while (c < json.size()) {
+            char ch = json[c++];
+            if (ch == '"') { out = v; return true; }
+            if (ch == '\\') {
+                if (c >= json.size()) return false;
+                char e = json[c++];
+                if (e == '"' || e == '\\' || e == '/') v += e;
+                else if (e == 'n') v += '\n';
+                else if (e == 't') v += '\t';
+                else return false;
+            } else if ((unsigned char)ch < 0x20) return false;
+            else v += ch;
+        }
+        return false;
+    }
+    return false;
+}
+
+static bool JsonFindInt(const std::string& json, const char* key, int64_t& out) {
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = 0;
+    while ((p = json.find(pat, p)) != std::string::npos) {
+        size_t c = p + pat.size();
+        while (c < json.size() && (json[c] == ' ' || json[c] == '\t' || json[c] == '\r' || json[c] == '\n')) c++;
+        if (c >= json.size() || json[c] != ':') { p++; continue; }
+        c++;
+        while (c < json.size() && (json[c] == ' ' || json[c] == '\t' || json[c] == '\r' || json[c] == '\n')) c++;
+        if (c >= json.size()) return false;
+        bool neg = false;
+        if (json[c] == '-') { neg = true; c++; }
+        if (c >= json.size() || json[c] < '0' || json[c] > '9') return false;
+        int64_t v = 0;
+        while (c < json.size() && json[c] >= '0' && json[c] <= '9') {
+            v = v * 10 + (json[c] - '0');
+            if (v > 2000000000LL) return false;
+            c++;
+        }
+        out = neg ? -v : v;
+        return true;
+    }
+    return false;
+}
+
+bool ParseAppUpdateManifest(const std::string& json, AppUpdateManifest& out, std::string& error) {
+    out = {};
+    if (json.size() > 16384) { error = "更新情報が大きすぎます"; return false; }
+    int64_t protocol = 0, bytes = 0;
+    std::string version, sha256, url;
+    if (!JsonFindInt(json, "protocol", protocol)) { error = "更新情報に protocol がありません"; return false; }
+    if (protocol != 1) { error = "対応していない更新プロトコルです（" + std::to_string(protocol) + "）"; return false; }
+    if (!JsonFindString(json, "version", version)) { error = "更新情報に version がありません"; return false; }
+    if (CompareVersions(version, "0.0.0") == -2) { error = "version の形式が不正です"; return false; }
+    // セマンティック版: 数字.数字.数字（追加の .数字 も可）
+    {
+        size_t dots = 0; bool ok = !version.empty();
+        for (size_t i = 0; i < version.size(); i++) {
+            char c = version[i];
+            if (c == '.') { dots++; if (i == 0 || i + 1 == version.size() || version[i + 1] == '.') ok = false; }
+            else if (c < '0' || c > '9') ok = false;
+        }
+        if (!ok || dots < 2) { error = "version は x.y.z 形式である必要があります"; return false; }
+    }
+    if (!JsonFindString(json, "sha256", sha256)) { error = "更新情報に sha256 がありません"; return false; }
+    sha256 = ToLower(sha256);
+    if (sha256.size() != 64) { error = "sha256 の長さが不正です"; return false; }
+    for (char c : sha256) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { error = "sha256 の形式が不正です"; return false; }
+    if (!JsonFindInt(json, "bytes", bytes) || bytes < 1) { error = "更新情報の bytes が不正です"; return false; }
+    if (bytes > 100LL * 1024 * 1024) { error = "更新パッケージが大きすぎます"; return false; }
+    if (!JsonFindString(json, "url", url)) { error = "更新情報に url がありません"; return false; }
+    if (!IsAllowedAppUpdateUrl(url)) { error = "更新先 URL が許可されていません"; return false; }
+    out.protocol = (int)protocol;
+    out.version = version;
+    out.sha256 = sha256;
+    out.bytes = (uint64_t)bytes;
+    out.url = url;
+    error.clear();
+    return true;
+}
+
+fs::path AppLockPath(const fs::path& appDir) { return appDir / ".gkk" / "app.lock"; }
+
+bool ReadInstalledApp(const fs::path& appDir, std::string& version, std::string& sha256) {
+    auto lp = AppLockPath(appDir);
+    std::error_code ec;
+    if (!fs::exists(lp, ec)) return false;
+    LockInfo l;
+    if (!ParseLock(ReadAll(lp), l)) return false;
+    if (l.id != "app" || l.version.empty() || l.sha256.empty()) return false;
+    version = l.version;
+    sha256 = ToLower(l.sha256);
+    return true;
+}
+
+bool WriteInstalledApp(const fs::path& appDir, const AppUpdateManifest& m, const std::vector<InstalledFile>& files, const std::string& installedAt) {
+    LockInfo l{"app", m.version, m.sha256, installedAt, files};
+    return WriteAllAtomic(AppLockPath(appDir), FormatLock(l));
+}
+
+ExtractResult ExtractAppZip(const fs::path& zip, const fs::path& appDir,
+                            const std::function<void(uint64_t, uint64_t)>& progress,
+                            const std::function<bool()>& cancel) {
+    // 空のステージへ展開する前提。既存 dest を消すのは呼び出し側。
+    return ExtractZip(zip, appDir, progress, cancel);
+}
+
+static bool RemoveTreeBestEffort(const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    return !fs::exists(dir, ec);
+}
+
+SwapAppResult SwapAppDir(const fs::path& stageDir, const fs::path& destAppDir, const fs::path& oldAppDir) {
+    SwapAppResult r;
+    std::error_code ec;
+    if (!fs::exists(stageDir, ec) || !fs::is_directory(stageDir, ec)) { r.error = "ステージ先がありません"; return r; }
+    // 必須 exe
+    if (!fs::exists(stageDir / "GameKouryakuKun.exe", ec)) { r.error = "更新パッケージに本体がありません"; return r; }
+    // 古い退避先を片付ける
+    if (fs::exists(oldAppDir, ec)) {
+        if (!RemoveTreeBestEffort(oldAppDir)) { r.error = "以前の退避フォルダを消せません（本体が起動中の可能性）: " + oldAppDir.u8string(); return r; }
+    }
+    bool hadDest = fs::exists(destAppDir, ec);
+    if (hadDest) {
+        fs::rename(destAppDir, oldAppDir, ec);
+        if (ec) { r.error = "現行の本体フォルダを退避できません（起動中の可能性）: " + ec.message(); return r; }
+    }
+    fs::rename(stageDir, destAppDir, ec);
+    if (ec) {
+        // ロールバックを試す
+        if (hadDest) fs::rename(oldAppDir, destAppDir, ec);
+        r.error = "新しい本体フォルダへ切り替えられません: " + ec.message();
+        return r;
+    }
+    RemoveTreeBestEffort(oldAppDir);  // 失敗しても新 app は生きている
+    r.ok = true;
+    return r;
+}
+
 }  // namespace gkk
