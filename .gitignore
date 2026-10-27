@@ -1,0 +1,65 @@
+# Build outputs
+**/bin/
+**/obj/
+**/out/
+**/TestResults/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.DotSettings.user
+
+# Publish / stage / dist artifacts
+dist/
+dist-dev/
+parts/
+phase1/bin/
+phase1/binh/
+phase1/stage/
+**/publish/
+*.nupkg
+
+# Local runtime data (machine-specific)
+**/data/
+**/ui-settings.json
+**/launch-settings.json
+**/supervisor.json
+memory.sqlite
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Real-machine diagnostics & release zips (kept local only)
+real-machine-archive/
+releases/
+*.diag.zip
+**/dungeon-shift/
+
+# Large probe / result archives (not source)
+phase0-probe.zip
+phase0-probe-v2.zip
+phase1-harness.zip
+phase0-results/
+phase1-results/
+phase0/bin/
+phase0v2/bin/
+
+# OS / editor junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+*~
+*.swp
+*.tmp
+*.log
+
+# Secrets / credentials (if ever dropped here)
+.env
+.env.*
+*.pem
+*.pfx
+secrets/
+
+# phase1 build tree (launcher is built from src/launcher)
+phase1/launcher/

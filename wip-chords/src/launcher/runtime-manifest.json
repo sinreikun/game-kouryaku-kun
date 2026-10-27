@@ -1,0 +1,58 @@
+{
+  "_comment": "ランチャー「ゲーム攻略くん.exe」が app\\ の本体を動かすために runtime\\ へ用意する .NET。サイズ・SHA-256 は 2026-10-18 に実際に取得したファイルで実測、SHA-512 は公式 releases.json の値（実測と一致）。gen_manifest.py がこのファイルから launcher に埋め込む定数を生成する。",
+  "manifest_version": 1,
+  "runtime_dir": "runtime",
+  "release_metadata": "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json",
+  "components": [
+    {
+      "id": "dotnet-runtime",
+      "display_name": ".NET Runtime 10.0.13 (win-x64)",
+      "version": "10.0.13",
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/dotnet/runtime/blob/main/LICENSE.TXT"
+      },
+      "homepage": "https://dotnet.microsoft.com/download/dotnet/10.0",
+      "urls": [
+        "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.13/dotnet-runtime-10.0.13-win-x64.zip"
+      ],
+      "file_name": "dotnet-runtime-10.0.13-win-x64.zip",
+      "size_bytes": 36970749,
+      "sha512": "2b98792ce86adc50899764ad2e4d21bd25cfda5432eeb0b4dfe7944f3ea049f9e0570a8f4aee92314d97cdb5f8b7be1363d501fc5012e680371e607af648ef40",
+      "sha256": "8db74a746baa450925d01325a2108ccf6ac39af4018047475292ae155c013d89",
+      "required_files": [
+        "dotnet.exe",
+        "host/fxr/10.0.13/hostfxr.dll",
+        "shared/Microsoft.NETCore.App/10.0.13/System.Private.CoreLib.dll",
+        "shared/Microsoft.NETCore.App/10.0.13/coreclr.dll"
+      ]
+    },
+    {
+      "id": "windowsdesktop-runtime",
+      "display_name": ".NET Desktop Runtime 10.0.13 (win-x64, WPF)",
+      "version": "10.0.13",
+      "license": {
+        "spdx": "MIT",
+        "url": "https://github.com/dotnet/windowsdesktop/blob/main/LICENSE.TXT"
+      },
+      "homepage": "https://dotnet.microsoft.com/download/dotnet/10.0",
+      "urls": [
+        "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/10.0.13/windowsdesktop-runtime-10.0.13-win-x64.zip"
+      ],
+      "file_name": "windowsdesktop-runtime-10.0.13-win-x64.zip",
+      "size_bytes": 39169839,
+      "sha512": "7cd78051b34f12239852e3685de57630aaeca0fd36e6ef3b41df3f256cf45a820377f316696c5e11316f0bb6e4e84e07fa99367e71472623b33c5d07405c4568",
+      "sha256": "5b68b6739ff71ac862c2e90a50851483da041941ee76cf71b5dbb5d081c15870",
+      "required_files": [
+        "shared/Microsoft.WindowsDesktop.App/10.0.13/PresentationFramework.dll",
+        "shared/Microsoft.WindowsDesktop.App/10.0.13/wpfgfx_cor3.dll"
+      ]
+    }
+  ],
+  "support": {
+    "channel": "10.0",
+    "release_type": "lts",
+    "release_date": "2026-10-13",
+    "eol_date": "2028-11-14"
+  }
+}

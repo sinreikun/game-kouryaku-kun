@@ -1,0 +1,206 @@
+﻿ゲーム攻略くん Observation Layer 再設計・統合指示
+
+【目的】
+現在のゲーム攻略くんはGlobalな画面分類、粗い色・区画特徴、OCR、State Transitionを中心として学習している。しかし最終目的である「ゲームタイトルを問わず、ゲーム固有知識を与えず、画面と入力だけからゲームの仕組みを経験・推理し攻略する」には、現在のObservationの粒度が不足している。
+
+ここでObservation Layerの仕様を根本から再設計し、それをWorld Model、Prediction、Goal、Planning、Skill、Action Selectionまで一貫して利用できる構造へ変更すること。
+
+既存の自然変化学習、State/Transition、Prediction、Goal、Planning、Skill、OCR、Human Control、Supervisor、provenance、Viewer、health report等は可能な限り維持し、その下にある「目」と経験表現を強化する。
+
+1. 最上位原則
+ゲーム攻略くんから情報を隠すことがゼロ知識の目的ではない。
+「画面から人間プレイヤーが観測可能な情報は、可能な限り高い粒度で取得してよい。」
+禁止するのはゲーム内部から取得した正解情報、および開発者による意味付けである。
+
+禁止例：
+・HP、満腹度、攻撃力等をゲーム内部値・メモリ・APIから取得
+・「この画像はプレイヤー」「これは敵」「これは階段」
+・「この数字はHP」「この文章は空腹警告」
+・「これは設定画面」「この状態は死亡」
+・ゲーム固有の正解行動や攻略情報
+
+画面から観測した画像、局所画像特徴、色、形状、輪郭、テクスチャ、位置、移動、姿勢・向きに相当する見た目の差異、出現・消失、Entity候補間の相対位置、OCR文字列、数字、文字列・数字の変化、時間変化、Actionとの相関、入力なし変化、再現性、周期性は積極的に利用してよい。
+
+原則：「目と手は開発者が作る。見たものの意味は攻略くんが経験から推理する。」
+
+2. 1 Action = 1 Complete Observation
+ターン単位で安定状態を取得できる場合は、
+Observation_before → Action → Observation_after
+を1経験とし、Observation_afterを取得・処理してから次Actionを決定すること。
+
+速度向上のために数手ごとにしかOCRしない、局所特徴を更新しない、Action間の画面情報を意図的に捨てる設計は禁止する。
+
+高速化は差分解析、ROI、キャッシュ、不変領域の結果継承、並列処理等で行う。「再OCRしていない」と「そのStepでは文字を観測していない」を同一にしない。各StepのText Observationにはその時点の文字状態が揃っていること。
+
+3. Observationの階層化
+単一State IDへ画面情報を早期に潰さない。
+Raw Frame → Global Scene Features → Regions → Visual Entity/Pattern Candidates → Entity State → Relations → Text/Numeric Observations → Temporal Changes → Structured Observation
+という階層を基本とする。
+既存m43等はGlobal Scene Familyとして残してよいが、世界状態そのものとはしない。
+
+4. Global Scene
+色分布、枠、粗い区画特徴は大域画面分類として維持可能。ただし同じGlobal Sceneでも局所Entity、位置関係、文字、数値、姿勢、周辺構造が異なり得ることを保持する。
+
+5. Region認識
+固定8×6平均色だけに依存しない。周囲との差、時間的共変動、一緒に移動する、Actionとの相関、繰り返し出現、異なる時間特性等から局所Region候補を抽出する。ゲーム上の意味は与えない。
+
+6. Visual Entity / Pattern Candidate
+「キャラクター」「敵」「アイテム」と定義せず、繰り返し観測される局所視覚パターンをEntity候補として扱う。
+一時/継続ID、位置、大きさ、Bounding region、局所特徴、色・形状・テクスチャ、見た目状態、移動量・方向、出現・消失、継続時間、追跡確信度、他Entityとの関係等を保持可能にする。
+目的は「画面が変わった」から「同じ何かと思われる局所パターンがどう変わったか」への拡張である。
+
+7. 姿勢・向き
+同じ位置・同じEntity候補でも姿勢や向きに相当する再現性ある局所画像差を保持する。
+上下左右とは教えず appearance_state A/B/C/D 等として扱い、Action、移動方向、他Entityとの位置関係との相関から意味を推理させる。位置が変わらず姿勢だけ変化したStepも重要Observationとする。
+
+8. Entity間Relation
+相対位置、距離、接近、離反、重なり、隣接、同方向移動、追従、出現消失の時間関係等を意味ラベルなしで記録する。
+
+9. OCR・文字・数字
+OCRは補助特徴ではなく主要Observationとする。
+文字列、位置、Region、OCR確信度、前Stepとの差、出現、消失、変更部分、継続性を保持する。
+数字も「35→31→27」のような時系列として保持し、何を意味するかはAction、Entity Relation、Transition等との相関から攻略くん自身が推理する。
+
+10. 自然文字変化とAction由来文字変化
+文字変化の重要度を弱めない。
+observed text change / natural text change probability / action-caused text change probability / causal confidence を分離する。
+自然に変化する文字も観測から削除しない。
+
+11. Temporal Observation
+各Stepを独立静止画だけとして扱わず、前StepからのEntity移動、姿勢変化、出現消失、文字・数字変化、自然Region変化、Action直後・遅延変化を保持する。
+
+12. 自然変化を消さない
+動くRegionを単純マスクでWorld Modelから消さない。natural change rate、temporal pattern、periodicity、location、appearance transition等として学習する。安定判定用表現とWorld Model用Observationは必要なら分離する。
+
+13. State表現
+既存State IDは索引・圧縮表現として利用してよいが、World ModelをState IDだけに依存させない。
+Global Scene、Region構造、Entity集合、appearance states、Relations、Text/Numeric、Temporal properties、natural-change model等を参照可能にする。
+
+14. World Model
+State + Action → Next State は維持しつつ、
+Structured Observation + Action → Predicted Changes
+へ拡張する。
+Global Scene、Entity移動、appearance、Relation、Text、Numeric pattern、出現消失、次State候補等を予測可能にする。
+
+15. Prediction Error
+Global Stateだけでなく、位置、appearance、Relation、Text、Numeric、Entity出現消失等の予測外れを区別する。
+継続的な外れをState表現の粗さ、Entity同定、隠れ条件、自然変化誤帰属、観測不足等の仮説・再観測・分化へつなげる。
+
+16. 特徴の意味・重要性を経験から学ぶ
+開発者がゲーム知識から重要度を決めない。
+「この特徴を知っていると次の結果をよく予測できる」特徴を経験から重要視する。
+頻繁に変化しても将来予測に寄与しない特徴は観測を残したままAction価値を下げてよい。
+
+17. 短期変化と長期進展の分離
+設定、閲覧画面、UI等を意味で禁止しない。
+視覚・文字・未知変化が多くても、到達可能範囲、Transition Graph、将来選択肢、Planning、Skill、Prediction能力が増えない領域は、経験から再訪価値を下げる。後に新しい関係が発見されたら再評価可能とする。
+
+18. Wait
+Waitは「何もしなかった場合」を知る一般的な対照実験とする。
+自然変化Baselineの不確実性が高ければ情報価値が上がり、観測が十分なら自然に下がる。
+Visual/Text/Entity movement/appearance/timing baselineを学習する。
+
+19. Action Selection
+Structured ObservationからPrediction uncertainty/error、information gain、controllability、unknown relation/entity behavior、unexplained text/numeric change、Frontier expansion、long-term progress等を利用する。
+単純な好奇心増幅ではなく、「どのActionなら現在の仮説を最も区別できるか」というActive Experimentへ発展させる。
+
+20. Goal / Planning
+GoalをGlobal State IDだけに限定しない。
+未知Relation確認、Entity変化再現、未知TransitionのあるRegion到達、Text/Numeric変化条件確認、Frontier到達等を意味ラベルなしの自己目的として扱える方向へ拡張する。
+PlanningもStructured Observation条件を段階的に利用する。
+
+21. Skill
+Skillを固定ActionSequenceだけでなく、「ある観測条件から、ある予測可能な結果を安定して起こす再利用可能な手順」へ発展可能にする。
+Global Scene、Entity配置、appearance、Relation、Text/Numeric等を開始・終了条件に利用可能にする。閾値を緩めて無理にSkillを作らない。
+
+22. Human Control
+Human Controlも同じStructured Observation形式で記録する。人間Actionを正解として模倣しないが、観測されたWorld Model上の事実は利用してよい。provenance=humanを維持。
+
+23. Viewer
+内部CoTではなく、Global Scene、Region、Entity候補/追跡ID、位置、appearance、移動、Relation、OCR、自然変化、Action後変化、Prediction/Error、Action Score、Goal、Plan、Skill、confidenceを構造化表示する。
+可能ならOverlayで「攻略くんが何を見ているか」を監査可能にする。人間が意味ラベルを教えるためには使わない。
+
+24. Health Report
+Observation欠損率、OCR Step coverage、Entity追跡/再同定、appearance安定性、自然/Action変化分離、Text/Numeric変化、Relation、局所/Global Prediction、Prediction Error、新規Transition、reachable範囲、Frontier、Planning Horizon、Replanning、Skill、Action Score短期/長期寄与等を測定可能にする。
+特徴検出数そのものではなくPrediction、Controllability、Reachability、Planning、再利用性の改善を見る。
+
+25. Performance
+1StepのObservation品質を単純な手数速度のために犠牲にしない。
+初期ターン制ゲームでは「速く大量に打つ」より「1手から取得可能な情報を欠損なく経験に残す」を優先する。
+差分解析、ROI、キャッシュ、不変Region継承、並列化等で最適化する。
+
+26. 将来のリアルタイムゲーム
+ターン制を攻略知識として固定しない。Observation Layerはcontinuous frames、event/change detection、temporal windows、Action timingへ拡張可能にする。ただし将来対応を理由に現在の1Action完全Observationを崩さない。
+
+27. DB移行
+旧経験は可能な限り維持する。新しいEntity/Relation等を旧データへ推測で埋めない。
+schema version/provenanceを持たせ、legacy coarse observationとnew structured observationを区別する。
+不可逆な大量経験破棄が必要な場合のみ確認する。
+
+28. 実装順
+最終構造を先に設計し、段階実装する。
+1 Structured Observation schema
+2 1Action=complete Observation保証
+3 Global Scene統合
+4 Region/difference tracking
+5 Local pattern/Entity candidate
+6 Entity temporal tracking
+7 appearance/orientation-like differences
+8 Relation
+9 OCR/Text/Numeric Structured統合
+10 natural vs action-caused change
+11 local Prediction
+12 Prediction Error
+13 feature importance learning
+14 Action Selection統合
+15 Goal/Planning統合
+16 Skill統合
+17 Viewer/Health Report
+18 長時間・再起動成長試験
+依存関係上変更が適切なら理由を記録して自律変更可。
+
+29. Synthetic Test
+ゲーム固有意味を使わず、小Pattern移動、姿勢のみ変化、接近/離反、出現消失、数字のStep変化、一瞬のText、自然背景変化、Action無関係アニメーション、Action後Region変化、同Global Sceneで局所状態違い、見た目違いでTransition同等、見た目同じで結果違い等をGround Truthとしてテストする。意味ラベルは攻略くんへ渡さない。
+
+30. 実機検証
+人間はEntity候補、追跡、姿勢差、毎Step文字数字保持、Action前後取りこぼし等を開発評価してよい。
+「プレイヤー」「敵」「HP」「階段」等の人間の意味判断をAI学習へ戻さない。
+
+31. 完了条件
+最低限以下が一連の系として接続されるまでObservation Layer再設計を完了扱いしない。
+1 1ActionごとにStructured Observation生成
+2 OCR/Text/NumericがStep単位で欠損しない
+3 局所Pattern/Entity候補追跡
+4 同一位置でappearance/orientation-like変化記録
+5 Entity移動・出現・消失記録
+6 Relation記録
+7 自然変化とAction後変化を別学習
+8 World ModelがStructured Observation利用
+9 Predictionが局所変化を扱う
+10 Prediction Errorが学習・再分類へ戻る
+11 Action Selectionが新Observationの不確実性・情報価値を利用
+12 Goal/Planningが新Observation利用
+13 Skillが新Observation条件を利用可能
+14 Viewerで「何を見ているか」を監査可能
+15 旧データとのprovenance/schema差を保持
+16 ゲーム固有知識混入なし
+
+32. 優先度
+これはm45脱出専用修正ではない。Frontier、Planning、Skill、長時間成長試験の基礎となる優先ブロックとして扱う。
+途中で現在の粗いObservationを前提とした好奇心重み調整や店専用調整を積み重ねない。
+重大バグ、データ破損、Supervisor等の安全上必要な修正を除き、まず新Observation基盤を成立させる。
+
+原則に反しない設計判断・実装・Synthetic Test・移行処理は確認を挟まず連続して進めてよい。
+停止して確認するのは、
+・ゲーム固有知識を必要とする
+・ゼロ知識原則と衝突する
+・大量の既存経験を不可逆に破棄する
+・プロジェクト目的そのものを変更する
+場合に限定する。
+
+各ブロック報告：
+Version / Observation schema変更 / 実装内容 / 既存機能との接続 / Predictionへの影響 / Action Selectionへの影響 / Goal・Planning・Skillへの影響 / Performance / Migration / Tests / Game-specific knowledge audit / Viewer・Health Report / 未完成項目 / 次ブロック
+
+最終目的：
+「画面を細かく分類できるAI」ではない。
+画面に映った未知の世界を1手ごとに十分観測し、何が存在し、何が変化し、何と何が関係し、その違いがActionの結果をどう変えるのかを経験から推理し、その推理を次の行動・目的・計画・Skillへ反映して、自力で攻略能力を成長させるシステムにすること。

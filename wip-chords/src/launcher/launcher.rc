@@ -1,0 +1,28 @@
+#pragma code_page(65001)
+#include <winver.h>
+1 24 "launcher.manifest"
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 0,4,0,0
+PRODUCTVERSION 0,4,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041104B0"
+    BEGIN
+      VALUE "CompanyName", "ゲーム攻略くん"
+      VALUE "FileDescription", "ゲーム攻略くん 起動ツール（.NET ランタイム準備）"
+      VALUE "FileVersion", "0.4.0"
+      VALUE "InternalName", "GameKouryakuKunLauncher"
+      VALUE "OriginalFilename", "ゲーム攻略くん.exe"
+      VALUE "ProductName", "ゲーム攻略くん"
+      VALUE "ProductVersion", "0.4.0"
+      VALUE "LegalCopyright", "MIT（miniz 3.0.2 を同梱: MIT）"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0411, 1200
+  END
+END

@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- ゲーム非依存・OS非依存のロジック（Linuxでユニットテスト可能） -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>GameKouryakuKun.Core</RootNamespace>
+    <IsTrimmable>true</IsTrimmable>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="GameKouryakuKun.Core.Tests" />
+  </ItemGroup>
+</Project>

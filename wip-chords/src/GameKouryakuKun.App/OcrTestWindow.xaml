@@ -1,0 +1,29 @@
+<Window x:Class="GameKouryakuKun.App.OcrTestWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="OCRテスト" Width="1300" Height="800" Background="{StaticResource Bg}" WindowStartupLocation="CenterOwner">
+  <DockPanel Margin="10">
+    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock Text="エンジン" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <ComboBox x:Name="EngineBox" Width="300" Margin="0,0,8,0"/>
+      <Button x:Name="RunButton" Content="読み取る" Click="Run_Click" FontWeight="Bold"/>
+      <Button x:Name="CompareButton" Content="全エンジンで比較" Click="Compare_Click" ToolTip="PaddleOCR と Windows 内蔵 OCR の結果を並べて表示"/>
+      <Button x:Name="RecaptureButton" Content="今のゲーム画面を取り直す" Click="Recapture_Click"/>
+      <Button Content="画像ファイルを開く…" Click="Open_Click"/>
+      <TextBlock x:Name="Status" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap"/>
+    </WrapPanel>
+    <Grid>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+      <Border Background="Black">
+        <Viewbox Stretch="Uniform">
+          <Grid x:Name="ImageHost">
+            <Image x:Name="Img"/>
+            <Canvas x:Name="Overlay" IsHitTestVisible="False"/>
+          </Grid>
+        </Viewbox>
+      </Border>
+      <TextBox Grid.Column="2" x:Name="ResultText" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontSize="14"
+               Background="{StaticResource Well}" Foreground="{StaticResource Fg}" BorderThickness="0"/>
+    </Grid>
+  </DockPanel>
+</Window>

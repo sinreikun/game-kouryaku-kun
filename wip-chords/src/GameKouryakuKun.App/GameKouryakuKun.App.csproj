@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 鑑賞アプリ GameKouryakuKun.exe（WPF）。左にライブ画面、右に状態パネル。win-x64 フレームワーク依存（.NET 8 Desktop Runtime はランチャー「ゲーム攻略くん.exe」がアプリ配下に用意する）。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>GameKouryakuKun.App</RootNamespace>
+    <AssemblyName>GameKouryakuKun</AssemblyName>
+    <Version>0.25.4</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <!-- 単一 exe にしない（app\ フォルダに dll を並べる。配布 zip を小さくし、ランタイムは別途取得） -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <!-- 8.0.x の最新パッチで動かす（ランチャーが取得する版と一致させる） -->
+    <RollForward>LatestPatch</RollForward>
+    <DebugType>none</DebugType>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>ja;en</SatelliteResourceLanguages>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="System.IO" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameKouryakuKun.Core\GameKouryakuKun.Core.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Windows\GameKouryakuKun.Windows.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Storage\GameKouryakuKun.Storage.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Supervisor\GameKouryakuKun.Supervisor.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Setup\GameKouryakuKun.Setup.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Ocr\GameKouryakuKun.Ocr.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\profiles\torneko-remaster\profile.json" LogicalName="profiles/torneko-remaster/profile.json" />
+    <EmbeddedResource Include="..\components\manifest.json" LogicalName="components/manifest.json" />
+  </ItemGroup>
+</Project>

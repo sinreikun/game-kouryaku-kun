@@ -1,0 +1,32 @@
+<Window x:Class="GameKouryakuKun.App.SetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="セットアップ（追加部品の導入）" Width="900" Height="620" Background="{StaticResource Bg}" WindowStartupLocation="CenterOwner">
+  <DockPanel Margin="12">
+    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="{StaticResource Dim}" Margin="0,0,0,8"
+               Text="部品は exe に同梱されたマニフェスト（取得元・版・サイズ・SHA-256・ライセンス）どおりに取得し、ハッシュを検証してから配置します。正常に導入済みのファイルは取得し直しません。中断しても次回は途中から再開します。"/>
+    <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+      <ProgressBar x:Name="Progress" Height="16" Minimum="0" Maximum="1"/>
+      <TextBlock x:Name="ProgressText" Margin="0,4,0,8" TextWrapping="Wrap"/>
+      <CheckBox x:Name="LicenseCheck" Content="選択した部品のライセンス（上の一覧に表示）を確認し、同意します" Margin="0,0,0,8"/>
+      <WrapPanel>
+        <Button x:Name="InstallButton" Content="選択した部品を導入" Click="Install_Click" FontWeight="Bold"/>
+        <Button x:Name="InstallAllButton" Content="未導入をすべて導入" Click="InstallAll_Click"/>
+        <Button x:Name="VerifyButton" Content="完全検査（全ファイルのSHA-256）" Click="Verify_Click"/>
+        <Button x:Name="CancelButton" Content="中断" Click="Cancel_Click" IsEnabled="False"/>
+        <Button Content="閉じる" Click="Close_Click"/>
+      </WrapPanel>
+    </StackPanel>
+    <ListView x:Name="List" Background="{StaticResource Well}" BorderBrush="{StaticResource BorderBrush}" Foreground="{StaticResource Fg}" SelectionMode="Extended">
+      <ListView.View>
+        <GridView>
+          <GridViewColumn Header="部品" Width="220" DisplayMemberBinding="{Binding Name}"/>
+          <GridViewColumn Header="版" Width="160" DisplayMemberBinding="{Binding Version}"/>
+          <GridViewColumn Header="ライセンス" Width="190" DisplayMemberBinding="{Binding License}"/>
+          <GridViewColumn Header="DLサイズ" Width="80" DisplayMemberBinding="{Binding Size}"/>
+          <GridViewColumn Header="状態" Width="200" DisplayMemberBinding="{Binding Status}"/>
+        </GridView>
+      </ListView.View>
+    </ListView>
+  </DockPanel>
+</Window>

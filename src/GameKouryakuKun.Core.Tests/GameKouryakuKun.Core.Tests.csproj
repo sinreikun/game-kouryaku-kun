@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameKouryakuKun.Core\GameKouryakuKun.Core.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Storage\GameKouryakuKun.Storage.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Supervisor\GameKouryakuKun.Supervisor.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Setup\GameKouryakuKun.Setup.csproj" />
+    <ProjectReference Include="..\GameKouryakuKun.Ocr\GameKouryakuKun.Ocr.csproj" />
+    <!-- 禁止API検査のため Windows 実装とハーネスもビルドする（参照はしない。出力DLLのメタデータを読む） -->
+    <ProjectReference Include="..\GameKouryakuKun.Windows\GameKouryakuKun.Windows.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\GameKouryakuKun.App\GameKouryakuKun.App.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\components\manifest.json" Link="components\manifest.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\profiles\**\*.json" Link="profiles\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

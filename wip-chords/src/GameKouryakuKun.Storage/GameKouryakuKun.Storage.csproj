@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SQLite 永続層（app.sqlite / memory.sqlite）。OS非依存（Linuxでテスト可能） -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>GameKouryakuKun.Storage</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameKouryakuKun.Core\GameKouryakuKun.Core.csproj" />
+    <InternalsVisibleTo Include="GameKouryakuKun.Core.Tests" />
+  </ItemGroup>
+</Project>
