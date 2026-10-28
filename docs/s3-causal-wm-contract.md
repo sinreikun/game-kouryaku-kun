@@ -2,7 +2,7 @@
 
 - 文書: `docs/s3-causal-wm-contract.md`
 - 拘束上位: `future-architecture.md` §8 Temporal/Causality・§9 World Model・§10 Prediction Error・§30 S3
-- 版: S3-contract-0.2（2026-10-28 / v0.33.8）
+- 版: S3-contract-0.3（2026-10-28 / v0.33.9）
 - 対象 Stage: **S3**（因果仮説比較の契約面 + 薄いシェル。深層 WM・能動実験は後続）
 
 本契約は実装可能な短い仕様である。GT / Track / Explorer / Goal / P-7 / しきい値 / 学習アルゴリズムは **変更しない**。
@@ -28,7 +28,7 @@
 | **H0** 自然 | wait / no-input 分布と区別不能 | NaturalBaseline / wait 観測との対照。Action 後に起きただけでは棄却も採用もしない |
 | **H1** 即時因果 | 特定 Action 後に残差が説明される | RegionCausality の手依存・CausedShare 等。**Action 後に起きたことだけで H1 を採用しない**（対照頻度・LogBf が必要） |
 | **H2** 遅延因果 | ラグ k で説明される | `DelayedChange` / NaturalBaseline.AfterAction 等の遅延証拠 |
-| **H3** 文脈条件付き | 同一 Action でも局所文脈で分岐 | 本スライス: 多くは `not_implemented`（予測 WM 接続後） |
+| **H3** 文脈条件付き | 同一 Action でも局所文脈で分岐 | `PredictiveWmShortHorizon` + `LocalEventModel.ContextHelps` / PredictContext。強い分岐は scored+LogBf、弱ければ partial/low_confidence（偽の確度禁止） |
 | **H4** 共通原因 | 複数局所が同一潜伏要因 | 本スライス: 多くは `not_implemented`（独立クラス集計のヒントのみ任意） |
 
 ### 1.1 証拠
@@ -129,29 +129,44 @@
 
 `reduces_with_history` / `reduces_nowhere` は稀でもキュー仕様は同じ（0 件でも Health は NotTested/Info）。
 
+
+---
+
+## 4.2 Predictive WM 短時間層 + H3（v0.33.9）
+
+| 要素 | 規則 |
+|---|---|
+| 表面 | `PredictiveWmShortHorizon`（`predictive_wm_short_horizon@1`） |
+| WRAP | `LocalEventModel.Predict` / `PredictContext` / `ContextHelps`。任意で `EntityExperience` ヒット率ヒント。TransitionModel は任意（本配線は局所主） |
+| 出力 | 要因ごと P（move / appear-disappear / text-number 等の形式名）、mean surprise、prediction_miss、context_helps 件数 |
+| H3 | 源なし → `not_observed`。ContextHelps≥1 → scored + LogBf≥ln10。文脈差のみ → scored partial（LogBf null）。**偽の確度で preferred しない** |
+| PE | prediction_miss かつ context_helps>0 → `reduces_with_history`；miss のみ → `representation_coarse`（既存と OR）。`reduces_nowhere` は仍スタブ |
+| フラグ | `GKK_ATTACH_CAUSAL_WM=1` 時のみ Session が Forecast→Compare。既定 OFF で探索不変 |
+| 禁止 | 意味ラベル・しきい値変更・Explorer/Goal/GT 変更・学習報酬への PE 注入 |
+
 ## 5. 非目標
 
 - P-7・しきい値緩和・GT/Track/EE アルゴリズム変更
 - Explorer / Goal / Skill 再設計（S5/S6）
 - 特徴重要度の本実装（S4）
 - 能動実験の実行（S5）
-- 深層 Predictive WM の完成（本スライスは比較シェル）
+- 深層／中長時間 Predictive WM の完成（本スライスは短時間 WRAP + H3）
 - GitHub Release / `latest.json`
 
 ---
 
-## 6. 合格条件（v0.33.8 スライス）
+## 6. 合格条件（v0.33.9 スライス）
 
-1. PE タグが特徴候補キューに入り、status=pending で永続化できる
-2. Health / 診断 summary に H0–H4 preferred とタグ件数が見える
-3. Accept は status のみ（WM 自動拡大なし）
-4. フラグ既定 OFF で探索不変
-5. `src/audit/v0.33.8.md`・§30.1 更新・全テスト緑
+1. `PredictiveWmShortHorizon` が既存 LocalEvent 予測を WRAP して要因 P を返す
+2. H3 が `not_implemented` から脱出（scored / not_observed / partial）。強い ContextHelps のみ preferred 可
+3. prediction_miss → PE タグが PeClosedLoop に載る（フラグ ON）
+4. フラグ既定 OFF で探索不変。中長時間 WM / S4 / S5 は非目標
+5. `src/audit/v0.33.9.md`・§30.1 更新・全テスト緑
 
 ---
 
 ## 7. 次の微小ステップ
 
-1. Predictive WM 短時間層と H3 接続
-2. 候補 Accept 時の文脈特徴試験（S4 Importance の入口）
-3. その後 S4（P-7 には戻らない）
+1. **S4** Importance（候補 Accept 時の文脈特徴試験。P-7 には戻らない）
+2. 中時間 Predictive WM（旧 TransitionModel 内包）は後続
+3. H4 本実装・能動実験（S5）は後続

@@ -1475,6 +1475,8 @@ public sealed class PlaySession
     public volatile GameKouryakuKun.Core.Observation.ObservationBundle? LatestObservationBundle;
     /// <summary>S3: フラグ ON 時の H0–H4 比較（探索・学習は参照しない）。</summary>
     public volatile GameKouryakuKun.Core.Causality.CausalComparisonRecord? LatestCausalComparison;
+    /// <summary>S3: 短時間 Predictive WM 読み取り（フラグ ON 時。探索・学習は参照しない）。</summary>
+    public volatile GameKouryakuKun.Core.Causality.ShortHorizonForecast? LatestShortHorizon;
     /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
     public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
     private PeClosedLoopStore? _peStore;
@@ -1701,6 +1703,7 @@ public sealed class PlaySession
     private volatile GameKouryakuKun.Core.Exploration.PredictedOutcome? _lastWorldPred;
     private GameKouryakuKun.Core.Observation.EntityLayer? _prevEntity;
     private int[] _lastEvents = Array.Empty<int>();
+    private string _lastLocalCtx = "none";
     public GameKouryakuKun.Core.Observation.SkillLocalEffects SkillEffects { get; } = new();
     public GameKouryakuKun.Core.Observation.LocalEventModel LocalEvents { get; } = new();
     private static List<int> ChangedCells(GameKouryakuKun.Core.Ocr.TextSnapshot? a, GameKouryakuKun.Core.Ocr.TextSnapshot b)
@@ -1770,7 +1773,7 @@ public sealed class PlaySession
                 lock (AppTable) AppTable.Observe(_prevEntity, ent, action);   // v0.31.5（P-6 の一部）: 見た目の表（記録だけ）
                 lock (EntityExp) EntityExp.Observe(_prevEntity, ent, action, evs.Contains(Array.IndexOf(GameKouryakuKun.Core.Observation.LocalEventModel.Events, "text_changed")), evs.Contains(Array.IndexOf(GameKouryakuKun.Core.Observation.LocalEventModel.Events, "number_changed")));   // v0.32.0（P-6）
                 lock (NumTable) NumTable.Observe(o.Text, action);
-                _prevEntity = ent; _lastEvents = evs;
+                _prevEntity = ent; _lastEvents = evs; _lastLocalCtx = lctx;
             }
             catch (Exception e) { _env.Log.Write("entity_failed", ("step", step), ("error", e.Message)); }
         }
@@ -1782,7 +1785,7 @@ public sealed class PlaySession
             ("entities", o.EntityLayer?.Candidates.Count), ("relations", o.EntityLayer?.Relations.Count), ("events", o.Prediction == null ? null : string.Join(",", o.Prediction.Occurred.Select(i => GameKouryakuKun.Core.Observation.LocalEventModel.Events[i]))));
         // v0.33.5 S2: Observation Bundle 派生（既定 OFF。探索・学習・GT は不変）
         TryAttachObservationBundle(o, step);
-        // v0.33.8 S3: Causal WM + PE 閉ループ（既定 OFF）
+        // v0.33.9 S3: Causal WM + Predictive WM short-horizon / H3（既定 OFF）
         TryAttachCausalWm(o, step);
     }
 
@@ -1873,7 +1876,7 @@ public sealed class PlaySession
     private void TryAttachCausalWm(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
     {
         RuntimeFlags.ApplyCausalWmEffective();
-        if (!RuntimeFlags.AttachCausalWm) { LatestCausalComparison = null; return; }
+        if (!RuntimeFlags.AttachCausalWm) { LatestCausalComparison = null; LatestShortHorizon = null; return; }
         try
         {
             // Prefer residual / region cells if present; RegionLayer stores bbox only — use Entity residual when available.
@@ -1890,6 +1893,19 @@ public sealed class PlaySession
                 changedCells = list;
             }
             bool trackUnstable = o.EntityLayer?.Candidates.Any(c => c.IdentityPosterior is <= 0 || (!c.Continuous && !c.New)) == true;
+            GameKouryakuKun.Core.Causality.ShortHorizonForecast preSh;
+            lock (ObsBuilder)
+            {
+                lock (EntityExp)
+                    preSh = GameKouryakuKun.Core.Causality.PredictiveWmShortHorizon.Forecast(
+                        new GameKouryakuKun.Core.Causality.ShortHorizonInput(
+                            o.Before, o.Action, LocalEvents, _lastLocalCtx,
+                            o.Prediction?.Occurred, o.Prediction?.Surprise,
+                            WorldModel: null,
+                            ActualNextNode: o.After,
+                            EntityExperience: EntityExp));
+            }
+            LatestShortHorizon = preSh;
             var input = new GameKouryakuKun.Core.Causality.CausalCompareInput(
                 Step: step,
                 Action: o.Action,
@@ -1902,7 +1918,14 @@ public sealed class PlaySession
                 DelayedPresent: o.Temporal.Delayed != null,
                 DelayedCells: o.Temporal.Delayed?.Cells,
                 TrackUnstableHint: trackUnstable,
-                ResidualCellCount: o.EntityLayer?.ResidualCells?.Count);
+                ResidualCellCount: o.EntityLayer?.ResidualCells?.Count,
+                LocalEvents: LocalEvents,
+                LocalContextKey: _lastLocalCtx,
+                ObservedLocalEvents: o.Prediction?.Occurred,
+                LocalSurprise: o.Prediction?.Surprise,
+                ActualNextNode: o.After,
+                EntityExperience: EntityExp,
+                ShortHorizon: preSh);
             var rec = GameKouryakuKun.Core.Causality.CausalHypothesisComparer.Compare(input);
             LatestCausalComparison = rec;
             // PE closed-loop: record→queue (WM accept remains stub)
@@ -1928,13 +1951,18 @@ public sealed class PlaySession
                 ("preferred", rec.Preferred),
                 ("tags", string.Join(",", rec.PeRoutingTags)),
                 ("sources", string.Join(",", rec.EvidenceSources)),
+                ("sh_status", preSh.Status),
+                ("sh_miss", preSh.PredictionMiss),
+                ("sh_ctx_help", preSh.ContextHelpEvents),
                 ("h0", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H0Natural)?.Status),
                 ("h1", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H1Immediate)?.Status),
-                ("h2", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H2Delayed)?.Status));
+                ("h2", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H2Delayed)?.Status),
+                ("h3", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H3Context)?.Status));
         }
         catch (Exception e)
         {
             LatestCausalComparison = null;
+            LatestShortHorizon = null;
             _env.Log.Write("causal_wm_failed", ("step", step), ("error", e.Message));
         }
     }

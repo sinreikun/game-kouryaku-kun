@@ -11,7 +11,7 @@ namespace GameKouryakuKun.Core.Causality;
 public static class CausalHypothesisComparer
 {
     public const string ComparerId = "causal_hypothesis_comparer@1";
-    public const string ComparerVersion = "1";
+    public const string ComparerVersion = "2";
 
     public static CausalComparisonRecord Compare(CausalCompareInput input)
     {
@@ -30,19 +30,29 @@ public static class CausalHypothesisComparer
         // --- H2 delayed ---
         scores[CausalHypothesisIds.H2Delayed] = ScoreH2(input, sources, layers);
 
-        // --- H3 / H4 stubs ---
-        scores[CausalHypothesisIds.H3Context] = new HypothesisScore
-        {
-            Id = CausalHypothesisIds.H3Context,
-            Status = LayerStatus.NotImplemented,
-            Note = "context-conditioned WM not wired in S3 shell",
-        };
+        // --- H3 contextual (Predictive WM short-horizon WRAP) ---
+        var sh = input.ShortHorizon ?? PredictiveWmShortHorizon.Forecast(new ShortHorizonInput(
+            input.Node, input.Action, input.LocalEvents, input.LocalContextKey,
+            input.ObservedLocalEvents, input.LocalSurprise, input.WorldModel, input.ActualNextNode, input.EntityExperience));
+        scores[CausalHypothesisIds.H3Context] = ScoreH3(input, sh, sources, layers);
+
+        // --- H4 stub ---
         scores[CausalHypothesisIds.H4CommonCause] = ScoreH4Hint(input, sources, layers);
 
-        layers.PredictionErrorLink = LayerStatus.NotImplemented;
+        if (sh.Status == LayerStatus.Observed)
+        {
+            sources.Add("predictive_wm_short_horizon");
+            layers.PredictiveWmShortHorizon = LayerStatus.Observed;
+            layers.PredictionErrorLink = LayerStatus.Observed;
+        }
+        else
+        {
+            layers.PredictiveWmShortHorizon = LayerStatus.NotObserved;
+            layers.PredictionErrorLink = LayerStatus.NotObserved;
+        }
 
         var preferred = Prefer(scores);
-        var tags = RoutePe(input, scores, preferred);
+        var tags = RoutePe(input, scores, preferred, sh);
 
         return new CausalComparisonRecord
         {
@@ -58,6 +68,75 @@ public static class CausalHypothesisComparer
             EvidenceSources = sources.Distinct(StringComparer.Ordinal).ToList(),
             Layers = layers,
             Comparer = ComparerId,
+            ShortHorizon = sh.Status == LayerStatus.Observed ? sh : null,
+        };
+    }
+
+    private static HypothesisScore ScoreH3(CausalCompareInput input, ShortHorizonForecast sh, List<string> sources, CausalLayerStatus layers)
+    {
+        if (input.LocalEvents == null && input.ShortHorizon == null)
+        {
+            return new HypothesisScore
+            {
+                Id = CausalHypothesisIds.H3Context,
+                Status = LayerStatus.NotObserved,
+                Note = "no local_event_model / short_horizon input",
+            };
+        }
+
+        if (sh.Status != LayerStatus.Observed)
+        {
+            return new HypothesisScore
+            {
+                Id = CausalHypothesisIds.H3Context,
+                Status = LayerStatus.NotObserved,
+                Note = sh.Note ?? "short_horizon not_observed",
+            };
+        }
+
+        sources.Add("local_event_model");
+        int help = sh.ContextHelpEvents;
+        double l1 = sh.ContextDivergenceL1;
+
+        // Strong: ContextHelps（既存 ln10 ゲート）が 1 件以上 → LogBf 下限 = RevertMinLogBayesFactor
+        if (help > 0)
+        {
+            double logBf = SplitReview.RevertMinLogBayesFactor;
+            return new HypothesisScore
+            {
+                Id = CausalHypothesisIds.H3Context,
+                Status = "scored",
+                LogBf = Math.Round(logBf, 4),
+                LogScore = Math.Round(logBf + Math.Log(1 + l1), 4),
+                SupportN = help,
+                ContrastN = LocalEventModel.Events.Length,
+                Note = "context_helps_branch; same_action_local_context",
+            };
+        }
+
+        // Partial / low-confidence: 文脈キーありで pooled と ctx 予測がわずかに違う、または観測はあるが分岐未成立
+        if (!string.IsNullOrEmpty(sh.ContextKey) && l1 > 1e-6)
+        {
+            return new HypothesisScore
+            {
+                Id = CausalHypothesisIds.H3Context,
+                Status = "scored",
+                LogScore = Math.Round(Math.Log(1 + l1) - 1.0, 4), // 低信頼: 明示的に弱く
+                LogBf = null,
+                SupportN = 0,
+                ContrastN = LocalEventModel.Events.Length,
+                Note = "partial_context_divergence; low_confidence",
+            };
+        }
+
+        return new HypothesisScore
+        {
+            Id = CausalHypothesisIds.H3Context,
+            Status = "scored",
+            LogScore = -1.0,
+            SupportN = 0,
+            ContrastN = LocalEventModel.Events.Length,
+            Note = "short_horizon_observed; context_split_not_supported_yet",
         };
     }
 
@@ -233,11 +312,17 @@ public static class CausalHypothesisComparer
         var h1 = scores[CausalHypothesisIds.H1Immediate];
         var h0 = scores[CausalHypothesisIds.H0Natural];
         var h2 = scores[CausalHypothesisIds.H2Delayed];
+        var h3 = scores[CausalHypothesisIds.H3Context];
 
         bool h1Ok = h1.Status == "scored" && h1.LogBf is double bf && bf >= SplitReview.RevertMinLogBayesFactor;
         bool h0Ok = h0.Status == "scored";
         bool h2Ok = h2.Status == "scored" && h2.SupportN is > 0;
+        // H3: only prefer when ContextHelps-strength LogBf is present (no fake certainty from partial)
+        bool h3Ok = h3.Status == "scored" && h3.LogBf is double bf3 && bf3 >= SplitReview.RevertMinLogBayesFactor;
 
+        if (h3Ok && (!h1Ok || (h3.LogScore ?? double.NegativeInfinity) >= (h1.LogScore ?? double.NegativeInfinity))
+            && (!h0Ok || (h3.LogScore ?? double.NegativeInfinity) >= (h0.LogScore ?? double.NegativeInfinity)))
+            return CausalHypothesisIds.H3Context;
         if (h1Ok && (!h0Ok || (h1.LogScore ?? double.NegativeInfinity) >= (h0.LogScore ?? double.NegativeInfinity)))
             return CausalHypothesisIds.H1Immediate;
         if (h2Ok && !h1Ok && (h2.LogScore ?? 0) > (h0.LogScore ?? double.NegativeInfinity))
@@ -247,7 +332,7 @@ public static class CausalHypothesisComparer
         return "undecided";
     }
 
-    private static IReadOnlyList<string> RoutePe(CausalCompareInput input, IReadOnlyDictionary<string, HypothesisScore> scores, string preferred)
+    private static IReadOnlyList<string> RoutePe(CausalCompareInput input, IReadOnlyDictionary<string, HypothesisScore> scores, string preferred, ShortHorizonForecast sh)
     {
         var tags = new List<string>();
         if (preferred == CausalHypothesisIds.H0Natural
@@ -262,8 +347,16 @@ public static class CausalHypothesisComparer
             && scores[CausalHypothesisIds.H1Immediate].Status != "scored")
             tags.Add(PeRoutingTags.RepresentationCoarse);
 
-        // History reduction / nowhere: explicit not wired — do not invent active experiment.
-        // Callers may still see empty for these; contract allows zero tags.
-        return tags;
+        // Short-horizon PE → closed-loop tags（能動実験はしない）
+        if (sh.Status == LayerStatus.Observed && sh.PredictionMiss)
+        {
+            if (sh.ContextHelpEvents > 0)
+                tags.Add(PeRoutingTags.ReducesWithHistory);
+            else if (!tags.Contains(PeRoutingTags.RepresentationCoarse))
+                tags.Add(PeRoutingTags.RepresentationCoarse);
+        }
+
+        // reduces_nowhere: 明示スタブのまま（S5）。勝手に能動探索しない。
+        return tags.Distinct(StringComparer.Ordinal).ToList();
     }
 }

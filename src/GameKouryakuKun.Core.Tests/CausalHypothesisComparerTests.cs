@@ -24,13 +24,13 @@ public class CausalHypothesisComparerTests : IDisposable
     }
 
     [Fact]
-    public void Missing_baselines_mark_h0_h1_not_observed_h3_not_implemented()
+    public void Missing_baselines_mark_h0_h1_h3_not_observed_h4_not_implemented()
     {
         var r = CausalHypothesisComparer.Compare(new CausalCompareInput(1, "button1", "n1", true, "agent"));
         Assert.Equal("undecided", r.Preferred);
         Assert.Equal(LayerStatus.NotObserved, r.Hypotheses.Single(h => h.Id == CausalHypothesisIds.H0Natural).Status);
         Assert.Equal(LayerStatus.NotObserved, r.Hypotheses.Single(h => h.Id == CausalHypothesisIds.H1Immediate).Status);
-        Assert.Equal(LayerStatus.NotImplemented, r.Hypotheses.Single(h => h.Id == CausalHypothesisIds.H3Context).Status);
+        Assert.Equal(LayerStatus.NotObserved, r.Hypotheses.Single(h => h.Id == CausalHypothesisIds.H3Context).Status);
         Assert.Equal(LayerStatus.NotImplemented, r.Hypotheses.Single(h => h.Id == CausalHypothesisIds.H4CommonCause).Status);
         Assert.DoesNotContain("キャラ", r.ToJson());
         Assert.DoesNotContain("enemy", r.ToJson(), StringComparison.OrdinalIgnoreCase);

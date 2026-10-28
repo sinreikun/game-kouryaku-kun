@@ -167,6 +167,7 @@ public class SensorStackAssemblerTests : IDisposable
         Assert.True(File.Exists(Path.Combine(SrcRoot(), "audit", "v0.33.6.md")));
         Assert.True(File.Exists(Path.Combine(SrcRoot(), "audit", "v0.33.7.md")));
         Assert.True(File.Exists(Path.Combine(SrcRoot(), "audit", "v0.33.8.md")));
+        Assert.True(File.Exists(Path.Combine(SrcRoot(), "audit", "v0.33.9.md")));
         var contract = File.ReadAllText(Path.Combine(root, "docs", "s2-sensor-stack-contract.md"));
         Assert.Contains("Observation Bundle", contract);
         Assert.Contains("中央最大＝キャラ", contract);

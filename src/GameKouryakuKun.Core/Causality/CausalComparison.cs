@@ -54,6 +54,8 @@ public sealed record CausalComparisonRecord
     public IReadOnlyList<string> EvidenceSources { get; init; } = Array.Empty<string>();
     public CausalLayerStatus Layers { get; init; } = new();
     public string Comparer { get; init; } = CausalHypothesisComparer.ComparerId;
+    /// <summary>短時間 Predictive WM の読み取り（任意。H3 / PE 接続用）。</summary>
+    public ShortHorizonForecast? ShortHorizon { get; init; }
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOpts);
 
@@ -70,6 +72,7 @@ public sealed class CausalLayerStatus
     public string NaturalBaseline { get; set; } = "not_observed";
     public string RegionCausality { get; set; } = "not_observed";
     public string Delayed { get; set; } = "not_observed";
+    public string PredictiveWmShortHorizon { get; set; } = "not_observed";
     public string PredictionErrorLink { get; set; } = "not_implemented";
 }
 
@@ -92,4 +95,14 @@ public sealed record CausalCompareInput(
     bool DelayedPresent = false,
     int? DelayedCells = null,
     bool? TrackUnstableHint = null,
-    int? ResidualCellCount = null);
+    int? ResidualCellCount = null,
+    /// <summary>短時間 Predictive WM（LocalEventModel WRAP）。無いと H3 は not_observed。</summary>
+    GameKouryakuKun.Core.Observation.LocalEventModel? LocalEvents = null,
+    string? LocalContextKey = null,
+    IReadOnlyList<int>? ObservedLocalEvents = null,
+    IReadOnlyList<double>? LocalSurprise = null,
+    GameKouryakuKun.Core.Exploration.TransitionModel? WorldModel = null,
+    string? ActualNextNode = null,
+    GameKouryakuKun.Core.Observation.EntityExperience? EntityExperience = null,
+    /// <summary>事前計算済み短時間予測（Session が付けた場合）。無いと Comparer が Forecast する。</summary>
+    ShortHorizonForecast? ShortHorizon = null);
