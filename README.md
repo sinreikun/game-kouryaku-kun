@@ -13,12 +13,13 @@
 - **しきい値を緩めない:** 実機で困っても、都合よく閾値を下げて通さない
 - **LLM を記憶や攻略知識の置き場にしない:** 連続経験は `memory.sqlite` などアプリ内の記録に残す
 
-詳細は `design.md` / `phase2-design.md` / `principle-original.md` と `src/docs/` を参照してください。
+詳細は `principle-original.md`（最上位原則）と **`future-architecture.md`（最終目標からの再設計・現行の拘束）** を先に読んでください。`design.md` / `phase2-design.md` / `src/docs/` は史料・部分移植元です（新規実装の拘束にはしません）。
 
 ## 構成
 
 | パス | 内容 |
 |------|------|
+| `future-architecture.md` | 最終目標からの全面再設計（KEEP/REBUILD/REMOVE/MISSING・新ロードマップ） |
 | `src/` | .NET ソリューション（WPF 本体・Core・Storage・OCR・テストなど） |
 | `src/GameKouryakuKun.sln` | ソリューション |
 | `src/profiles/` | ゲーム接続用プロファイル（身体条件のみ） |
