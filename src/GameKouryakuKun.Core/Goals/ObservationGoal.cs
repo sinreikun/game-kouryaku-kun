@@ -115,4 +115,19 @@ public static class ObservationGoalBridge
             Status = "proposed",
             Note = "track/number_series need Structured/Bundle evidence",
         };
+
+    /// <summary>Bundle/Entity/Structured 証拠から形式 Goal を並列提案（SelfGoal と並存）。</summary>
+    public static IReadOnlyList<ObservationGoal> ProposeFromEvidence(
+        GameKouryakuKun.Core.Observation.ObservationBundle? bundle,
+        GameKouryakuKun.Core.Observation.StructuredObservation? structured,
+        string? coarseNode = null,
+        string? action = null)
+    {
+        var ee = bundle?.EntityExperience;
+        var track = ObservationPredicateEvidence.ToGoal(
+            ObservationPredicateEvidence.TrackRelation(bundle, ee, structured, coarseNode));
+        var nums = ObservationPredicateEvidence.ToGoal(
+            ObservationPredicateEvidence.NumberSeries(bundle, structured, coarseNode, action));
+        return new[] { track, nums };
+    }
 }

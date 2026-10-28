@@ -1,4 +1,6 @@
+using GameKouryakuKun.Core.Causality;
 using GameKouryakuKun.Core.Exploration;
+using GameKouryakuKun.Core.Observation;
 using GameKouryakuKun.Core.Goals;
 using GameKouryakuKun.Storage;
 using Xunit;
@@ -97,7 +99,7 @@ public class StructuredGoalsTests : IDisposable
     }
 
     [Fact]
-    public void Planner_expands_skill_macro_and_stubs_wm()
+    public void Planner_expands_skill_macro_without_wm()
     {
         var miner = new SkillMiner();
         var skill = miner.PromoteFromSequence(new ActionSequenceCandidate
@@ -115,7 +117,8 @@ public class StructuredGoalsTests : IDisposable
         Assert.Equal("button1", plan.FirstAction);
         Assert.Equal(skill.Id, plan.ExpandedSkillId);
         Assert.False(plan.WmLookaheadUsed);
-        Assert.Contains("wm_lookahead=not_implemented", plan.Note!);
+        Assert.Equal("unused", plan.WmLookaheadStatus);
+        Assert.Contains("wm_lookahead=not_available", plan.Note!);
         Assert.Contains("no_supervisor_glue", plan.Note!);
 
         var mirror = StructuredPlanner.Propose(goal, Array.Empty<SkillRecord>(), "here", "wait");
@@ -171,9 +174,137 @@ public class StructuredGoalsTests : IDisposable
         Assert.Contains("クリア", text); // forbidden mentioned
         Assert.Contains("wm_lookahead", text);
         Assert.True(File.Exists(Path.Combine(root, "src", "audit", "v0.36.0.md")));
+        Assert.True(File.Exists(Path.Combine(root, "src", "audit", "v0.36.1.md")));
+        Assert.Contains("S6 クローズ", File.ReadAllText(Path.Combine(root, "docs", "s6-goal-plan-skill-contract.md")));
         var fa = File.ReadAllText(Path.Combine(root, "future-architecture.md"));
         Assert.Contains("S6 Goal", fa);
-        Assert.Contains("v0.36.0", fa);
+        Assert.Contains("v0.36.1", fa);
+        Assert.Contains("S6 クローズ可", fa);
+    }
+
+
+    [Fact]
+    public void Track_relation_scored_from_bundle_relations()
+    {
+        var bundle = new ObservationBundle
+        {
+            Relations = new[]
+            {
+                new RelationSnapshot(1, 2, 1, 0, 1.0, "moved", true, false, true),
+            },
+            EntityExperience = new EntityExperienceSnapshot
+            {
+                Observed = 5,
+                Tables = new[]
+                {
+                    new EntityExperienceTableStats("relation", 4, 3, 0, 0),
+                    new EntityExperienceTableStats("appearance", 0, 0, 0, 0),
+                    new EntityExperienceTableStats("movement", 0, 0, 0, 0),
+                    new EntityExperienceTableStats("text_number", 0, 0, 0, 0),
+                },
+                Follows = Array.Empty<FollowPairSnapshot>(),
+            },
+        };
+        var hit = ObservationPredicateEvidence.TrackRelation(bundle, null, null, "n0");
+        Assert.Equal("scored", hit.Status);
+        Assert.Equal(ObservationPredicateIds.TrackRelationReproduce, hit.PredicateId);
+        var goal = ObservationPredicateEvidence.ToGoal(hit, 3);
+        Assert.Equal("scored", goal.Predicate.Status);
+        Assert.DoesNotContain("ボス", goal.SummaryLine());
+    }
+
+    [Fact]
+    public void Number_series_scored_from_structured_text()
+    {
+        var so = new StructuredObservation(
+            1, 1, "test", "button1", "a", "b",
+            new GlobalScene("a", null, null, null, null, LayerStatus.Observed),
+            new RegionLayer(LayerStatus.NotObserved, 0, Array.Empty<ChangeRegion>()),
+            new TextLayer(LayerStatus.Observed, "ocr", "diff", Array.Empty<TextLineObs>(),
+                new[] { new NumberObs(3, 0, 5.0, 4.0, new[] { 3.0, 4.0, 5.0 }) }, 1, 0, 0.5),
+            new TemporalLayer(0, false, null, LayerStatus.Observed));
+        var hit = ObservationPredicateEvidence.NumberSeries(null, so, "n0", "button1");
+        Assert.Equal("scored", hit.Status);
+        Assert.Contains("series", hit.Note!);
+        Assert.True(hit.PeProxy > 0);
+    }
+
+    [Fact]
+    public void Number_series_not_enough_without_numbers()
+    {
+        var hit = ObservationPredicateEvidence.NumberSeries(null, null, "n0");
+        Assert.Equal("not_enough_evidence", hit.Status);
+    }
+
+    [Fact]
+    public void Planner_uses_short_horizon_and_suppresses_on_miss()
+    {
+        var miner = new SkillMiner();
+        miner.PromoteFromSequence(new ActionSequenceCandidate
+        {
+            Id = 3, Steps = new[] { "button1", "button2" }, Start = "here", End = "there",
+            Reproducibility = 0.9, Origin = "goal", Status = SequenceStatus.Active,
+        });
+        var goal = ObservationGoalBridge.FromSelfGoal(new SelfGoal
+        {
+            Id = 9, Kind = GoalKind.Reach, Target = "there", Origin = "t",
+            UncBefore = 0.7, PlanConfidence = 0.6, Budget = 4,
+        });
+        var ok = new ShortHorizonForecast
+        {
+            Status = LayerStatus.Observed,
+            PredictionMiss = false,
+            ContextHelpEvents = 1,
+            Note = "ok",
+        };
+        var planOk = StructuredPlanner.Propose(goal, miner.Skills, "here", "dpad_left", ok);
+        Assert.True(planOk.WmLookaheadUsed);
+        Assert.Equal("observed", planOk.WmLookaheadStatus);
+        Assert.Equal("soft_adopt_available", planOk.Status);
+        Assert.Contains("wm_lookahead=observed", planOk.Note!);
+
+        var miss = new ShortHorizonForecast { Status = LayerStatus.Observed, PredictionMiss = true };
+        var planMiss = StructuredPlanner.Propose(goal, miner.Skills, "here", "dpad_left", miss);
+        Assert.True(planMiss.WmLookaheadUsed);
+        Assert.NotEqual("soft_adopt_available", planMiss.Status);
+        Assert.Contains("skill_suppressed_wm_miss", planMiss.Note!);
+    }
+
+    [Fact]
+    public void Soft_adopt_budget_blocks_human_gap_window()
+    {
+        Assert.Equal("human", SoftAdoptBudget.BlockReason(0, 20, 10, null, Array.Empty<long>(), null, true));
+        Assert.Equal("budget", SoftAdoptBudget.BlockReason(SoftAdoptBudget.DefaultMaxSoftAdopts, SoftAdoptBudget.DefaultMaxSoftAdopts, 10, null, Array.Empty<long>(), null, false));
+        Assert.Equal("recovery_gap", SoftAdoptBudget.BlockReason(0, 20, 12, null, Array.Empty<long>(), lastRecoveryStep: 10, humanControl: false));
+        Assert.Equal("cooldown", SoftAdoptBudget.BlockReason(1, 20, 15, lastSoftAdoptStep: 10, Array.Empty<long>(), null, false));
+        Assert.Equal("window", SoftAdoptBudget.BlockReason(2, 20, 40, lastSoftAdoptStep: 30,
+            new long[] { 5, 20 }, null, false));
+        Assert.Null(SoftAdoptBudget.BlockReason(0, 20, 100, null, Array.Empty<long>(), null, false));
+
+        var blocked = StructuredPlanner.Propose(
+            ObservationGoalBridge.StubFormal(ObservationPredicateIds.FrontierReach, "n"),
+            Array.Empty<SkillRecord>(), "n", "a", softAdoptBlock: "recovery_gap");
+        // no skill → parallel or not_applicable; SoftAdoptBlock carried when legacy present
+        Assert.Equal("recovery_gap", blocked.SoftAdoptBlock);
+    }
+
+    [Fact]
+    public void Soft_adopt_block_marks_status_when_skill_ready()
+    {
+        var miner = new SkillMiner();
+        miner.PromoteFromSequence(new ActionSequenceCandidate
+        {
+            Id = 1, Steps = new[] { "x", "y" }, Start = "here", End = "there",
+            Reproducibility = 0.95, Origin = "goal", Status = SequenceStatus.Active,
+        });
+        var goal = ObservationGoalBridge.FromSelfGoal(new SelfGoal
+        {
+            Id = 1, Kind = GoalKind.Reach, Target = "there", Origin = "t",
+            UncBefore = 0.5, PlanConfidence = 0.8, Budget = 3,
+        });
+        var plan = StructuredPlanner.Propose(goal, miner.Skills, "here", "other", softAdoptBlock: "budget");
+        Assert.Equal("blocked", plan.Status);
+        Assert.Contains("soft_block=budget", plan.Note!);
     }
 
     [Fact]
@@ -187,5 +318,11 @@ public class StructuredGoalsTests : IDisposable
         Assert.Contains("SkillLibrary", ses);
         Assert.Contains("soft_adopt=skill_macro", ses);
         Assert.Contains("ApplyStructuredGoalsEffective", ses);
+        Assert.Contains("SoftAdoptBudget.BlockReason", ses);
+        Assert.Contains("_lastSupervisorRecoveryStep", ses);
+        Assert.Contains("ProposeFromEvidence", ses);
+        Assert.Contains("LatestShortHorizon", ses);
+        Assert.Contains("Human?.Enabled", ses);
     }
 }
+

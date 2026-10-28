@@ -847,7 +847,12 @@ public sealed class PlaySession
                 prevAfter = null; prevNoChange = false; pending.Clear(); composite = null; rechoose = 0; goalComposite = false;
                 explorer.ResetContext(); temporal.Break(); goals.Abandon(recovered ? "観測の中断（Supervisor の復旧）" : "ウィンドウの大きさの変化", step);
                 foreach (var ge in goals.Events.Skip(_goalEventsLogged).ToList()) LogGoal(ge, step);
-                if (recovered) ResumedReobserved++;
+                if (recovered)
+                {
+                    ResumedReobserved++;
+                    _lastSupervisorRecoveryStep = step;
+                    LatestPlanProposal = null; // 復旧前後の計画を接着しない
+                }
                 _env.Log.Write("supervisor_reobserve", ("step", step), ("recovered", recovered), ("from_node", oldNode), ("observed_node", curNode), ("stale_discarded", stale), ("human", Human.Enabled),
                     ("w", fr0?.Width), ("h", fr0?.Height));
                 Emit($"[Supervisor] 画面を観測し直しました（今の画面 {curNode}・捨てた古い手 {stale}）。{(Human.Enabled ? "Human Control のまま続けます" : "探索を続けます")}", LogLevel.Ok);
@@ -1524,6 +1529,9 @@ public sealed class PlaySession
     /// <summary>S6: Skill 表面（並び学習は ActionSequenceMiner のまま）。</summary>
     public readonly GameKouryakuKun.Core.Goals.SkillMiner SkillLibrary = new();
     public int StructuredSoftAdopts;
+    private readonly List<long> _softAdoptSteps = new();
+    private long? _lastSoftAdoptStep;
+    private long? _lastSupervisorRecoveryStep;
     /// <summary>S5: 寄与・割込み統計（フラグ ON 時。S7 メタ重み材料・本スライスは学習しない）。</summary>
     public readonly GameKouryakuKun.Core.Intrinsic.IntrinsicContributionStats IntrinsicStats = new();
     private readonly List<long> _activeExpInterruptSteps = new();
@@ -2286,6 +2294,8 @@ private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObse
     private ExploreChoice? GoalStepOrNull(SelfGoals goals, Explorer explorer, TransitionModel model, string cur, long step, Random rng)
     {
         if (!_o.SelfGoals) return null;
+        // Human Control 中は目的 soft adopt 経路に入らない（呼び出し側でも除外）
+        if (Human?.Enabled == true) return null;
         var g = goals.Active ?? goals.Propose(explorer, model, cur, step, rng);
         if (g == null) return null;
         if (g.Index == 0 && g.Steps == 0 && g.Replans == 0)
@@ -2294,7 +2304,6 @@ private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObse
         var name = goals.NextAction(explorer, model, cur, step);
         if (name == null)
         {
-            // S6: 失敗ヒントを並行ログ（計画をエピソード境界にしない）
             RuntimeFlags.ApplyStructuredGoalsEffective();
             if (RuntimeFlags.UseStructuredGoals && LatestObservationGoal != null)
             {
@@ -2317,8 +2326,23 @@ private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObse
                 ("pred", obs.Predicate.Id), ("pred_status", obs.Predicate.Status),
                 ("value", obs.ExpectedValue.Combined), ("legacy", obs.LegacyKind), ("status", obs.Status));
 
+            // Bundle/Entity 形式述語（SelfGoal と並存・達成数は報酬にしない）
+            foreach (var eg in GameKouryakuKun.Core.Goals.ObservationGoalBridge.ProposeFromEvidence(
+                LatestObservationBundle, LatestObservation, cur, name))
+            {
+                _env.Log.Write("structured_goal", ("step", step), ("summary", eg.SummaryLine()),
+                    ("pred", eg.Predicate.Id), ("pred_status", eg.Predicate.Status),
+                    ("value", eg.ExpectedValue.Combined), ("legacy", eg.LegacyKind), ("status", eg.Status),
+                    ("origin", eg.Origin));
+            }
+
+            string? softBlock = GameKouryakuKun.Core.Goals.SoftAdoptBudget.BlockReason(
+                StructuredSoftAdopts, GameKouryakuKun.Core.Goals.SoftAdoptBudget.DefaultMaxSoftAdopts,
+                step, _lastSoftAdoptStep, _softAdoptSteps, lastRecoveryStep: _lastSupervisorRecoveryStep, humanControl: false);
+
             string legacyNext = name;
-            var plan = GameKouryakuKun.Core.Goals.StructuredPlanner.Propose(obs, SkillLibrary.Skills, cur, legacyNext);
+            var plan = GameKouryakuKun.Core.Goals.StructuredPlanner.Propose(
+                obs, SkillLibrary.Skills, cur, legacyNext, LatestShortHorizon, softBlock);
             LatestPlanProposal = plan;
             bool soft = false;
             if (plan.Status == "soft_adopt_available" && plan.ExpandedSkillId is int adoptId
@@ -2336,11 +2360,14 @@ private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObse
                     a = seqAct;
                     soft = true;
                     StructuredSoftAdopts++;
+                    _lastSoftAdoptStep = step;
+                    _softAdoptSteps.Add(step);
                 }
             }
             _env.Log.Write("plan_propose", ("step", step), ("summary", plan.SummaryLine()), ("status", plan.Status),
                 ("first", plan.FirstAction), ("skill", plan.ExpandedSkillId), ("note", plan.Note),
-                ("soft_adopt", soft), ("legacy_next", legacyNext));
+                ("soft_adopt", soft), ("legacy_next", legacyNext), ("soft_block", softBlock),
+                ("wm", plan.WmLookaheadStatus), ("recovery_step", _lastSupervisorRecoveryStep));
             string reason = soft
                 ? $"目的 #{g.Id}: {g.Text}（{g.Steps + 1}/{g.Budget} 手目・soft_adopt=skill_macro）"
                 : $"目的 #{g.Id}: {g.Text}（{g.Steps + 1}/{g.Budget} 手目）";
