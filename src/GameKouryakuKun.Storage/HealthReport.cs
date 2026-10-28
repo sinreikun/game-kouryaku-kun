@@ -577,6 +577,9 @@ public static class HealthReport
         // S3 PE 閉ループ（ログ集計。学習報酬に使わない）
         AddPeClosedLoopFromLogs(cur, Add);
 
+        // S4 Importance / Attention（advisory。学習報酬に使わない）
+        AddImportanceFromLogs(cur, Add);
+
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();
         sb.AppendLine($"健全性レポート（ゲームに依らないシステム動作だけ。プレイ内容は評価しない）: 総合 {Mark(res.Overall)}");
@@ -690,6 +693,27 @@ public static class HealthReport
         add("因果WM", "PE ルーティングタグ（件数）", Level.Info, tagS);
         add("因果WM", "特徴候補 enqueue", cands.Count > 0 ? Level.Ok : summaries.Count > 0 ? Level.Info : Level.NotTested,
             $"pe_feature_candidate {cands.Count}・summary {summaries.Count}" + (summaries.Count > 0 ? "／" + Str(summaries[^1], "summary") : ""));
+    }
+
+
+    /// <summary>S4: feature_importance / attention_weights / pe_importance_recommend を件数表示。</summary>
+    internal static void AddImportanceFromLogs(IReadOnlyList<JsonElement> cur, Action<string, string, Level, string> add)
+    {
+        static bool IsType(JsonElement e, string name) =>
+            e.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == name;
+        var fi = cur.Where(e => IsType(e, "feature_importance")).ToList();
+        var at = cur.Where(e => IsType(e, "attention_weights")).ToList();
+        var rec = cur.Where(e => IsType(e, "pe_importance_recommend")).ToList();
+        if (fi.Count == 0 && at.Count == 0 && rec.Count == 0)
+        {
+            add("重要度", "Importance/Attention", Level.NotTested, "今回のログに feature_importance / attention_weights なし（フラグ OFF か未実行）");
+            return;
+        }
+        add("重要度", "特徴重要度レコード", fi.Count > 0 ? Level.Ok : Level.Info, $"feature_importance {fi.Count}");
+        string attn = at.Count == 0 ? "なし" : Str(at[^1], "summary");
+        if (attn == "") attn = $"attention_weights {at.Count}";
+        add("重要度", "注意重み（advisory）", at.Count > 0 ? Level.Info : Level.NotTested, attn);
+        add("重要度", "PE 推奨", rec.Count > 0 ? Level.Info : Level.NotTested, $"pe_importance_recommend {rec.Count}");
     }
 
     private static IEnumerable<string> SafeLines(string path)

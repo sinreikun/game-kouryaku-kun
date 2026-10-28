@@ -415,7 +415,7 @@ public sealed class PlaySession
             foreach (var b in _inputs) try { b.Dispose(); } catch { }
             _env.Log.Write("session_end", ("reason", endReason), ("stop_reason", StopReason), ("steps", Step), ("duration_s", Math.Round(_runClock.Elapsed.TotalSeconds, 1)),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource),
-                ("causal_wm", RuntimeFlags.AttachCausalWm), ("pe_enqueued", PeLoop.Enqueued), ("pe_pending", PeLoop.PendingCount),
+                ("causal_wm", RuntimeFlags.AttachCausalWm), ("importance", RuntimeFlags.AttachImportance), ("pe_enqueued", PeLoop.Enqueued), ("pe_pending", PeLoop.PendingCount),
                 ("pe_summary", RuntimeFlags.AttachCausalWm ? PeLoop.SummaryLine() : null),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
                 ("input_sent", Delivery.Sent), ("input_delivered", Delivery.Delivered), ("input_failed", Delivery.Failed), ("input_reaction_observed", Delivery.ReactionObserved),
@@ -564,6 +564,8 @@ public sealed class PlaySession
         RuntimeFlags.ApplyCausalWmEffective();
         Emit(RuntimeFlags.CausalWmStatusText() + "（S3・探索挙動は変えません）",
             RuntimeFlags.AttachCausalWm ? LogLevel.Ok : LogLevel.Info);
+        RuntimeFlags.ApplyImportanceEffective();
+        Emit(RuntimeFlags.ImportanceStatusText(), RuntimeFlags.AttachImportance ? LogLevel.Ok : LogLevel.Info);
         if (RuntimeFlags.AttachCausalWm) Emit(PeLoop.SummaryLine(), LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
@@ -1477,6 +1479,8 @@ public sealed class PlaySession
     public volatile GameKouryakuKun.Core.Causality.CausalComparisonRecord? LatestCausalComparison;
     /// <summary>S3: 短時間 Predictive WM 読み取り（フラグ ON 時。探索・学習は参照しない）。</summary>
     public volatile GameKouryakuKun.Core.Causality.ShortHorizonForecast? LatestShortHorizon;
+    /// <summary>S4: 重要度レポート（フラグ ON 時。探索・学習・ROI ライブは変えない）。</summary>
+    public volatile GameKouryakuKun.Core.Importance.ImportanceReport? LatestImportance;
     /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
     public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
     private PeClosedLoopStore? _peStore;
@@ -1787,6 +1791,8 @@ public sealed class PlaySession
         TryAttachObservationBundle(o, step);
         // v0.33.9 S3: Causal WM + Predictive WM short-horizon / H3（既定 OFF）
         TryAttachCausalWm(o, step);
+        // v0.34.0 S4: Importance & Attention（既定 OFF・advisory）
+        TryAttachImportance(o, step);
     }
 
     /// <summary>
@@ -1964,6 +1970,61 @@ public sealed class PlaySession
             LatestCausalComparison = null;
             LatestShortHorizon = null;
             _env.Log.Write("causal_wm_failed", ("step", step), ("error", e.Message));
+        }
+    }
+
+
+    /// <summary>
+    /// S4 Importance & Attention: 重要度推定・注意重み・PE 推奨（WM 自動拡大なし）。
+    /// <see cref="RuntimeFlags.AttachImportance"/> 既定 OFF（GKK_ATTACH_IMPORTANCE=1）。
+    /// </summary>
+    private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
+    {
+        RuntimeFlags.ApplyImportanceEffective();
+        if (!RuntimeFlags.AttachImportance) { LatestImportance = null; return; }
+        try
+        {
+            IReadOnlyList<string> tags = LatestCausalComparison?.PeRoutingTags ?? Array.Empty<string>();
+            if (tags.Count == 0 && PeLoop.PendingCount > 0)
+                tags = PeLoop.Snapshot(50).Select(c => c.Tag).Distinct().ToList();
+            bool trackUnstable = o.EntityLayer?.Candidates.Any(c => c.IdentityPosterior is <= 0 || (!c.Continuous && !c.New)) == true;
+            var input = new GameKouryakuKun.Core.Importance.ImportanceEstimateInput(
+                Step: step,
+                PeTags: tags,
+                Causal: LatestCausalComparison,
+                ShortHorizon: LatestShortHorizon,
+                TrackUnstableHint: trackUnstable,
+                ResidualCellCount: o.EntityLayer?.ResidualCells?.Count);
+            var report = GameKouryakuKun.Core.Importance.FeatureImportanceEstimator.Estimate(input, PeLoop);
+            LatestImportance = report;
+            foreach (var f in report.Features.Where(x => x.Status == "scored").Take(8))
+                _env.Log.Write("feature_importance",
+                    ("step", step), ("feature_id", f.FeatureId), ("score", f.Score), ("method", f.Method), ("status", f.Status),
+                    ("evidence", f.EvidenceSummary));
+            _env.Log.Write("attention_weights",
+                ("step", step),
+                ("summary", report.SummaryLine()),
+                ("regions", report.Attention.Regions),
+                ("tracks", report.Attention.Tracks),
+                ("ocr", report.Attention.Ocr),
+                ("residual", report.Attention.Residual),
+                ("policy", report.Attention.Policy));
+            if (report.RecommendationsWritten > 0)
+                _env.Log.Write("pe_importance_recommend",
+                    ("step", step), ("count", report.RecommendationsWritten),
+                    ("pending", PeLoop.PendingCount));
+            if (LatestObservationBundle != null && RuntimeFlags.AttachObservationBundle)
+            {
+                RuntimeFlags.ApplyBundleEffective();
+                lock (EntityExp)
+                    LatestObservationBundle = GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(
+                        o, entityExperience: EntityExp, causalComparison: LatestCausalComparison, attentionWeights: report.Attention);
+            }
+        }
+        catch (Exception e)
+        {
+            LatestImportance = null;
+            _env.Log.Write("importance_failed", ("step", step), ("error", e.Message));
         }
     }
 

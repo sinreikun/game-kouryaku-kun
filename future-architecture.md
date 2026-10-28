@@ -2,7 +2,7 @@
 
 - 文書: `future-architecture.md`
 - 作成: 2026-10-28（利用者指示 t112u）
-- 更新: 2026-10-28（t115u: S3 Predictive WM 短時間 + H3）
+- 更新: 2026-10-28（t115u: S4 Importance & Attention 開始）
 - 位置づけ: **現行コードを守る設計ではない**。最終目標と絶対原則だけを守り、現実装は KEEP / REBUILD / REMOVE / MISSING で評価する。
 - 本文書が承認されるまで、大規模な実装変更には着手しない。
 
@@ -744,7 +744,8 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 7. ~~EntityExperience Bundle 付帯 + Kernel Bundle 正規観測面~~ → `EntityExperience.Snapshot` / `ObservationKind.Bundle` / `ResolveObservation`（`src/audit/v0.33.6.md`、契約 0.2）。学習は Structured/memory.sqlite のまま。
 8. ~~S3 Causal WM 契約 + H0–H4 比較シェル~~ → `docs/s3-causal-wm-contract.md` + `CausalHypothesisComparer`（`src/audit/v0.33.7.md`）。
 9. ~~PE 閉ループ record→queue + Health 件数~~ → `PeClosedLoopRecorder` / `pe-closed-loop.sqlite` / Health「因果WM」（`src/audit/v0.33.8.md`）。
-10. ~~Predictive WM 短時間 + H3~~ → `PredictiveWmShortHorizon` WRAP（LocalEvent/ContextHelps）+ H3 scored/partial（`src/audit/v0.33.9.md`）。中長時間・H4・S5 は未。**次: S4** Importance（P-7 には戻らない）。
+10. ~~Predictive WM 短時間 + H3~~ → `PredictiveWmShortHorizon` WRAP（LocalEvent/ContextHelps）+ H3 scored/partial（`src/audit/v0.33.9.md`）。
+11. ~~S4 Importance & Attention 契約 + 薄いシェル~~ → `docs/s4-importance-attention-contract.md` + `FeatureImportanceEstimator` / AttentionWeights advisory / PE RecommendedStatus（`src/audit/v0.34.0.md`、`GKK_ATTACH_IMPORTANCE` 既定 OFF）。ライブ ROI・ablation_replay は未。**次:** ライブ ROI 任意 or **S5**（P-7 には戻らない）。
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。
 

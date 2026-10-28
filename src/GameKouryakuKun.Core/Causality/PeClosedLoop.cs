@@ -5,7 +5,7 @@ namespace GameKouryakuKun.Core.Causality;
 
 /// <summary>
 /// S3 PE 閉ループ（docs/s3-causal-wm-contract.md）: タグ→文脈特徴候補キュー。
-/// WM 条件付けへの自動採用はしない（accepted/rejected は記録のみ。§11 は後続）。
+/// WM 条件付けへの自動採用はしない。S4 で RecommendedStatus（重要度推奨）を記録可。
 /// </summary>
 public sealed class PeClosedLoopRecorder
 {
@@ -83,7 +83,55 @@ public sealed class PeClosedLoopRecorder
         return created;
     }
 
-    /// <summary>WM 採用は本スライスではスタブ: status だけ変える。</summary>
+
+    /// <summary>
+    /// S4: 重要度スコアから RecommendedStatus を書く。Status は変えない（WM 自動拡大禁止）。
+    /// </summary>
+    public int ApplyImportanceRecommendations(
+        IEnumerable<GameKouryakuKun.Core.Importance.FeatureImportanceRecord> features,
+        double acceptMin,
+        double rejectMax)
+    {
+        ArgumentNullException.ThrowIfNull(features);
+        var byTag = new Dictionary<string, GameKouryakuKun.Core.Importance.FeatureImportanceRecord>(StringComparer.Ordinal);
+        foreach (var f in features.Where(x => x.Status == "scored" && x.FeatureId.StartsWith("pe:", StringComparison.Ordinal)))
+        {
+            var tag = f.FeatureId["pe:".Length..];
+            if (!byTag.TryGetValue(tag, out var cur) || f.Score > cur.Score) byTag[tag] = f;
+        }
+        // ctx feature can boost representation_coarse / reduces_with_history
+        var ctx = features.FirstOrDefault(x => x.FeatureId == "ctx:local_context" && x.Status == "scored");
+        int n = 0;
+        lock (_gate)
+        {
+            foreach (var c in _pending.Where(x => x.Status == PeCandidateStatus.Pending))
+            {
+                double? score = null;
+                string? method = null;
+                if (byTag.TryGetValue(c.Tag, out var fr))
+                {
+                    score = fr.Score;
+                    method = fr.Method;
+                }
+                if (ctx != null && (c.Tag == PeRoutingTags.RepresentationCoarse || c.Tag == PeRoutingTags.ReducesWithHistory))
+                {
+                    score = Math.Max(score ?? 0, ctx.Score);
+                    method = method == null ? ctx.Method : method + "+" + ctx.Method;
+                }
+                if (score == null) continue;
+                c.Importance = Math.Round(score.Value, 4);
+                c.ImportanceMethod = method;
+                if (score.Value >= acceptMin) c.RecommendedStatus = PeCandidateStatus.Accepted;
+                else if (score.Value <= rejectMax) c.RecommendedStatus = PeCandidateStatus.Rejected;
+                else c.RecommendedStatus = null;
+                c.Detail = (c.Detail == null ? "" : c.Detail + ";") + "s4_importance_recommend";
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>WM 採用は明示 API: status だけ変える（推奨とは別）。</summary>
     public bool TrySetStatus(long candidateId, string status, string? detail = null)
     {
         if (status is not (PeCandidateStatus.Pending or PeCandidateStatus.Accepted or PeCandidateStatus.Rejected))
@@ -159,6 +207,10 @@ public sealed class PeFeatureCandidate
     public string? PreferredHypothesis { get; init; }
     public long? RunId { get; init; }
     public string? Detail { get; set; }
+    /// <summary>S4: 重要度に基づく推奨。Status（実 WM 採用）とは独立。</summary>
+    public string? RecommendedStatus { get; set; }
+    public double? Importance { get; set; }
+    public string? ImportanceMethod { get; set; }
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOpts);
 

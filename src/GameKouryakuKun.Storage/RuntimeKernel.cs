@@ -23,7 +23,7 @@ public sealed class RuntimeKernel : IDisposable
     public ExperienceVNextStore Store => _store;
     public string VNextPath => _store.Path;
 
-    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.9", Func<DateTime>? utcNow = null)
+    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.34.0", Func<DateTime>? utcNow = null)
     {
         _store = store;
         _appVersion = appVersion;
@@ -40,7 +40,7 @@ public sealed class RuntimeKernel : IDisposable
     }
 
     /// <summary>profileDataDir 配下の experience-vnext.sqlite を開く（memory.sqlite には触れない）。</summary>
-    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.9", Func<DateTime>? utcNow = null)
+    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.34.0", Func<DateTime>? utcNow = null)
     {
         var path = ExperienceVNextStore.DefaultPath(profileDataDir);
         var store = ExperienceVNextStore.Open(path, appVersion, utcNow);

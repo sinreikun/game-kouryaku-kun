@@ -19,7 +19,8 @@ public static class SensorStackAssembler
         RawRef? raw = null,
         bool includeTextLines = false,
         EntityExperience? entityExperience = null,
-        GameKouryakuKun.Core.Causality.CausalComparisonRecord? causalComparison = null)
+        GameKouryakuKun.Core.Causality.CausalComparisonRecord? causalComparison = null,
+        GameKouryakuKun.Core.Importance.AttentionWeights? attentionWeights = null)
     {
         ArgumentNullException.ThrowIfNull(obs);
 
@@ -46,6 +47,7 @@ public static class SensorStackAssembler
             Temporal = string.IsNullOrEmpty(obs.Temporal.Status) ? LayerStatus.Observed : obs.Temporal.Status,
             EntityExperience = eeSnap == null ? LayerStatus.NotObserved : LayerStatus.Observed,
             CausalComparison = causalComparison == null ? LayerStatus.NotObserved : LayerStatus.Observed,
+            Attention = attentionWeights == null ? LayerStatus.NotObserved : LayerStatus.Observed,
         };
 
         CoordinateFrameResult? frame = gt == null ? null : CopyFrame(gt);
@@ -99,6 +101,7 @@ public static class SensorStackAssembler
             Temporal = temporal,
             EntityExperience = eeSnap,
             CausalComparison = causalComparison,
+            Attention = attentionWeights,
             Provenance = obs.Provenance,
             Layers = layers,
             Source = new BundleSource("structured_observation", obs.Schema, AssemblerId),

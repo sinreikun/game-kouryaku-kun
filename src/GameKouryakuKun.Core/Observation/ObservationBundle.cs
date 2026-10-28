@@ -9,7 +9,7 @@ namespace GameKouryakuKun.Core.Observation;
 /// </summary>
 public sealed record ObservationBundle
 {
-    public const int CurrentSchema = 3;   // 根拠: v0.33.7 で causal_comparison 層を追加（docs/s3-causal-wm-contract.md）
+    public const int CurrentSchema = 3;   // 根拠: v0.33.7 causal_comparison。v0.34.0 Attention は任意付帯（schema 維持・additive）
 
     public int SchemaVersion { get; init; } = CurrentSchema;
     public long Step { get; init; }
@@ -26,6 +26,8 @@ public sealed record ObservationBundle
     public EntityExperienceSnapshot? EntityExperience { get; init; }
     /// <summary>S3: H0–H4 比較結果（docs/s3-causal-wm-contract.md）。無ければ layers で明示。</summary>
     public GameKouryakuKun.Core.Causality.CausalComparisonRecord? CausalComparison { get; init; }
+    /// <summary>S4: 注意重み（advisory。無ければ layers.attention）。ライブ ROI は変えない。</summary>
+    public GameKouryakuKun.Core.Importance.AttentionWeights? Attention { get; init; }
     public string Provenance { get; init; } = "unknown";
     public LayerStatusMap Layers { get; init; } = new();
     public BundleSource Source { get; init; } = new("structured_observation", StructuredObservation.CurrentSchema, SensorStackAssembler.AssemblerId);
@@ -155,6 +157,7 @@ public sealed record LayerStatusMap
     public string Temporal { get; init; } = LayerStatus.NotImplemented;
     public string EntityExperience { get; init; } = LayerStatus.NotImplemented;
     public string CausalComparison { get; init; } = LayerStatus.NotImplemented;
+    public string Attention { get; init; } = LayerStatus.NotImplemented;
 }
 
 public sealed record BundleSource(string Kind, int Schema, string Assembler);

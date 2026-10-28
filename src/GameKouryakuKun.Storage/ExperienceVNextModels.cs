@@ -213,4 +213,28 @@ public static class RuntimeFlags
             ? "Causal WM attach: ON（環境変数 GKK_ATTACH_CAUSAL_WM=1）"
             : "Causal WM attach: OFF（既定）";
     }
+
+    // --- S4 Importance & Attention 診断フラグ（docs/s4-importance-attention-contract.md §5）---
+
+    /// <summary>環境変数名。=1 で Session が重要度・注意重み・PE 推奨をログする（既定 OFF）。</summary>
+    public const string ImportanceEnvName = "GKK_ATTACH_IMPORTANCE";
+
+    /// <summary>Importance / Attention を診断へ付けるか。env のみ。</summary>
+    public static bool AttachImportance { get; set; }
+
+    public static bool ImportanceEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(ImportanceEnvName), "1", StringComparison.Ordinal);
+
+    public static void ApplyImportanceEffective()
+    {
+        AttachImportance = ImportanceEnvForcesOn;
+    }
+
+    public static string ImportanceStatusText()
+    {
+        ApplyImportanceEffective();
+        return AttachImportance
+            ? "Importance attach: ON（環境変数 GKK_ATTACH_IMPORTANCE=1）"
+            : "Importance attach: OFF（既定）";
+    }
 }
