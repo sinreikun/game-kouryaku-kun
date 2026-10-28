@@ -32,11 +32,18 @@ public sealed class ModelRegistryStore : IDisposable
         var boot = new ModelBundleSpec
         {
             Id = "champion/bootstrap@0",
-            Kind = ModelBundleKinds.Params,
-            Hypothesis = "bootstrap champion shell",
+            Kind = ModelBundleKinds.Weights,
+            Hypothesis = "bootstrap champion equal portfolio",
             Origin = "outer_shell",
-            Note = "S7 initial champion; no live behavior change",
-            Parameters = new Dictionary<string, double> { ["shell"] = 1.0 },
+            Note = "S7 initial champion; equal IntrinsicPortfolioWeights; no live behavior change until promote",
+            Parameters = new Dictionary<string, double>
+            {
+                ["info_gain_pe"] = 0.2,
+                ["controllability"] = 0.2,
+                ["reach_unknown"] = 0.2,
+                ["reversibility_options"] = 0.2,
+                ["skill_wm_long_term"] = 0.2,
+            },
         };
         RegisterBundle(boot);
         Db.Exec("INSERT INTO champion_pointer(key, bundle_id, previous_bundle_id, updated_at) VALUES($k,$b,NULL,$t)",

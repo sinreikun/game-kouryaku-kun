@@ -2,7 +2,7 @@
 
 - 文書: `docs/s7-outer-self-improvement-contract.md`
 - 拘束上位: `future-architecture.md` §19 Meta-Learning・§20 Performance・§27 Rollback・§30 S7
-- 版: S7-contract-0.1（2026-10-28 / v0.37.0）
+- 版: S7-contract-0.2（2026-10-28 / v0.37.1）
 - 対象 Stage: **S7**（Candidate 昇格・rollback・性能等価最適化の契約面 + 薄いシェル。Model Registry・Replay）
 
 本契約は実装可能な短い仕様である。GT / Track しきい値緩和 / P-7 / 本番コード自己改変 / S8 / GitHub Release は **変更しない**。
@@ -59,6 +59,25 @@ Candidate `kind`: `params` | `weights` | `roi` | `model_select` | `code_edit`（
 
 ---
 
+## 3.1 Experience MetricSnapshot（v0.37.1）
+
+| 項目 | 規則 |
+|---|---|
+| 同一スライス | Champion / Candidate は同じ PE 閉ループ・IntrinsicStats・因果タグから構築 |
+| Method | `experience_v1`（十分な mix/PE 件数）/ `experience_partial_v1`（sparse・正直）/ `fixture_v1`（単体テスト） |
+| PE 代理 | preferred=undecided 率 + representation_coarse 率（小さいほど良い） |
+| Candidate PE | 同一スライス上の **counterfactual**（info_gain 重み増 × 割込み後 ambiguity 低下率）。ライブ入力は増やさない |
+| 校正 | pending/enqueued 比率（両側同一） |
+
+## 3.2 Weight apply（可逆）
+
+| 項目 | 規則 |
+|---|---|
+| 対象 | Candidate `kind=weights` のみ。`code_edit` 拒否 |
+| Promote | 第二フラグ ON かつ比較合格 → `PortfolioWeightState.ApplyFromBundle` 成功後に Champion ポインタ切替。失敗なら重み rollback |
+| Rollback | レジストリ previous 復元 + 重み履歴 pop（対で実行） |
+| Mixer | `IntrinsicValueMixer.Mix(..., PortfolioWeights: state.Current)`。既定フラグ OFF 時は Default 均等のまま |
+
 ## 4. フラグ
 
 | 変数 | 既定 | 効果 |
@@ -81,23 +100,24 @@ Area「Outer/Registry」: champion id・last compare・rollback available・prom
 - 本番コード自己編集・S8 長期自律・P-7・GT/Track 緩和・Release
 - ライブゲーム入力を増やす Outer 実験（既定禁止）
 - S5/S4 の自動昇格
+- 本番コード自己編集
 
 ---
 
-## 7. 合格条件（v0.37.0）
+## 7. 合格条件（v0.37.1 / S7 クローズ）
 
-1. 本契約書がある
+1. 本契約書がある（experience MetricSnapshot + weight apply 記載）
 2. ModelRegistry が Champion/Candidate/compare/promote/rollback を記録できる
 3. 比較なし Promote が失敗する
-4. Rollback が Champion ポインタを復元する
-5. `code_edit` Candidate は reject / not_supported
-6. フラグ既定 OFF
-7. `src/audit/v0.37.0.md`・§30.1・全テスト緑
+4. Rollback が Champion ポインタ **と** ポートフォリオ重みを復元する
+5. `code_edit` Candidate は reject / not_supported（重み適用も拒否）
+6. フラグ既定 OFF → 探索・学習と同一
+7. Session が `intrinsic_fixture_v1` に依存しない（experience / partial）
+8. `src/audit/v0.37.1.md`・§30.1 **S7 クローズ可**・全テスト緑
 
 ---
 
-## 8. 次の微小ステップ
+## 8. 次の微小ステップ（S8 へ）
 
-1. Replay 実ログからの MetricSnapshot 抽出
-2. Intrinsic portfolio 重み Candidate の安全な適用経路
-3. Promote 予算・Champion 切替の実機診断 → S7 クローズ
+S7 クローズ後の次 Stage は **S8 Long-horizon Autonomy**（本契約の外。別着手）。
+S7 残作業ではない: Promote 予算の実機長時間診断は S8 Health/成長スイートで扱う。

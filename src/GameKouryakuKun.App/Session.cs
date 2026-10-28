@@ -1546,6 +1546,9 @@ public sealed class PlaySession
     private string? _lastActiveExpAction;
     private IntrinsicStatsStore? _intrinsicStore;
     private ModelRegistryStore? _modelRegistry;
+    /// <summary>S7: 適用中ポートフォリオ重み（promote/rollback と対）。フラグ OFF 時は Default のまま。</summary>
+    public readonly GameKouryakuKun.Core.Outer.PortfolioWeightState PortfolioWeights = new();
+    private long _lastOuterLoopStep = -1;
     /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
     public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
     private PeClosedLoopStore? _peStore;
@@ -2101,7 +2104,8 @@ public sealed class PlaySession
                     LatestCausalComparison?.PeRoutingTags,
                     ActiveExperimentInterrupts,
                     GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.DefaultMaxInterrupts,
-                    SoftInterruptBlock: block));
+                    SoftInterruptBlock: block,
+                    PortfolioWeights: PortfolioWeights.Current));
             LatestIntrinsic = report;
             IntrinsicStats.NoteMixStep();
             _env.Log.Write("intrinsic_mix",
@@ -2181,6 +2185,7 @@ public sealed class PlaySession
                     ("stats", IntrinsicStats.SummaryLine()));
 
             if (step % 25 == 0) try { FlushIntrinsicStats("periodic"); } catch { }
+            if (step % 50 == 0) try { TryRunOuterLoopShell(step); } catch { }
             return choice;
         }
         catch (Exception e)
@@ -2209,65 +2214,126 @@ public sealed class PlaySession
     }
 
 
-    /// <summary>S7: Outer Loop 薄いシェル（replay/fixture 評価。ライブ入力増なし）。</summary>
+    /// <summary>S7: Outer Loop — 同一経験スライスの MetricSnapshot + 任意 promote/weight apply。ライブ入力増なし。</summary>
     private void TryRunOuterLoopShell(long step)
     {
         RuntimeFlags.ApplyOuterLoopEffective();
         if (!RuntimeFlags.EnableOuterLoop) return;
+        // 根拠: 同一セッション内の再評価間隔（入力は増やさない・評価のみ）
+        if (step > 0 && _lastOuterLoopStep >= 0 && step - _lastOuterLoopStep < 50) return;
         try
         {
             _modelRegistry ??= ModelRegistryStore.Open(_env.ProfileDataDir, AppEnv.Version);
+            _lastOuterLoopStep = step;
             _env.Log.Write("outer_registry", ("step", step), ("summary", _modelRegistry.StatsSummary()),
-                ("rollback", _modelRegistry.RollbackAvailable()), ("champion", _modelRegistry.ChampionId()));
+                ("rollback", _modelRegistry.RollbackAvailable()), ("champion", _modelRegistry.ChampionId()),
+                ("weights", PortfolioWeights.SummaryLine()));
 
             var champId = _modelRegistry.ChampionId();
             if (champId == null) return;
             var champ = _modelRegistry.GetBundle(champId);
             if (champ == null) return;
 
+            var candWeights = BuildCandidateWeightsFromStats(IntrinsicStats);
             var cand = new GameKouryakuKun.Core.Outer.ModelBundleSpec
             {
                 Id = $"candidate/intrinsic-weights@{step}",
                 Kind = GameKouryakuKun.Core.Outer.ModelBundleKinds.Weights,
                 ParentId = champId,
-                Hypothesis = "shift portfolio toward info_gain_pe from intrinsic_stats (fixture)",
+                Hypothesis = "reweight portfolio from intrinsic contribution + PE tags (same experience slice)",
                 Origin = "intrinsic_stats",
-                Parameters = new Dictionary<string, double> { ["info_gain_pe"] = 0.3, ["equal_rest"] = 0.175 },
-                Note = "S7 shell candidate; not applied to live mixer",
+                Parameters = candWeights,
+                Note = "S7 experience Candidate; applied only on dual-flag promote",
             };
             _modelRegistry.AddCandidate(cand);
 
-            double peChamp = 0.5;
-            double peCand = 0.5;
-            if (IntrinsicStats.AmbiguityFellAfter > 0 && IntrinsicStats.InterruptsApplied > 0)
-                peCand = Math.Max(0.1, peChamp - 0.1);   // 根拠: fixture — 寄与が落ちたあとの PE 代理改善
-            var cm = new GameKouryakuKun.Core.Outer.MetricSnapshot
-            {
-                PeProxy = peChamp, CalibrationGapProxy = 0.2, ContributionInfoGain = 0.1,
-                SampleN = Math.Max(1, (int)IntrinsicStats.MixSteps), Method = "intrinsic_fixture_v1",
-            };
-            var dm = new GameKouryakuKun.Core.Outer.MetricSnapshot
-            {
-                PeProxy = peCand, CalibrationGapProxy = 0.2, ContributionInfoGain = 0.15,
-                SampleN = Math.Max(1, (int)IntrinsicStats.MixSteps), Method = "intrinsic_fixture_v1",
-            };
-            bool canRollbackPath = champId != null;
-            var cmp = GameKouryakuKun.Core.Outer.OuterLoopEvaluator.Compare(champ, cand, cm, dm, rollbackAvailable: canRollbackPath);
+            var champW = champ.Parameters != null && champ.Kind == GameKouryakuKun.Core.Outer.ModelBundleKinds.Weights
+                ? GameKouryakuKun.Core.Intrinsic.IntrinsicPortfolioWeights.FromParameters(champ.Parameters)
+                : PortfolioWeights.Current;
+            var (cm, dm, sliceNote) = GameKouryakuKun.Core.Outer.OuterMetricSnapshotBuilder.PairOnSameSlice(
+                IntrinsicStats, PeLoop, LatestCausalComparison, champW, candWeights);
+            // bootstrap 初回は previous が無くてもポインタ記録で rollback 可能になるため評価を許可
+            bool rollbackPathOk = _modelRegistry.RollbackAvailable() || champId.StartsWith("champion/bootstrap", StringComparison.Ordinal);
+            var cmp = GameKouryakuKun.Core.Outer.OuterLoopEvaluator.Compare(champ, cand, cm, dm, rollbackAvailable: rollbackPathOk);
             _modelRegistry.RecordComparison(cmp);
             _env.Log.Write("outer_compare", ("step", step), ("summary", cmp.SummaryLine()),
                 ("winner", cmp.Winner), ("can_promote", cmp.CanPromote), ("status", cmp.Status),
-                ("reasons", cmp.Reasons.ToList()), ("provenance", cmp.ProvenanceJson));
+                ("method", cm.Method), ("slice", sliceNote),
+                ("reasons", cmp.Reasons.ToList()), ("provenance", cmp.ProvenanceJson),
+                ("champ_pe", cm.PeProxy), ("cand_pe", dm.PeProxy));
 
             if (cmp.CanPromote && RuntimeFlags.OuterLoopPromoteEnabled)
-            {
-                var (ok, detail) = _modelRegistry.TryPromote(cand.Id, promoteFlagEnabled: true, reason: "flagged_promote_after_compare");
-                _env.Log.Write("outer_promote", ("step", step), ("ok", ok), ("detail", detail), ("candidate", cand.Id));
-            }
+                TryPromoteOuterCandidate(cand, step);
         }
         catch (Exception e)
         {
             _env.Log.Write("outer_loop_failed", ("step", step), ("error", e.Message));
         }
+    }
+
+    /// <summary>レジストリ昇格と重み適用を対で行う。失敗時は重みを戻す。</summary>
+    private void TryPromoteOuterCandidate(GameKouryakuKun.Core.Outer.ModelBundleSpec cand, long step)
+    {
+        if (_modelRegistry == null) return;
+        var applied = PortfolioWeights.ApplyFromBundle(cand);
+        if (!applied.Ok)
+        {
+            _env.Log.Write("outer_promote", ("step", step), ("ok", false), ("detail", applied.Detail), ("candidate", cand.Id));
+            return;
+        }
+        var (ok, detail) = _modelRegistry.TryPromote(cand.Id, promoteFlagEnabled: true, reason: "flagged_promote_after_compare");
+        if (!ok)
+        {
+            PortfolioWeights.Rollback();
+            _env.Log.Write("outer_promote", ("step", step), ("ok", false), ("detail", detail), ("candidate", cand.Id),
+                ("weights_rolled", true));
+            return;
+        }
+        _env.Log.Write("outer_promote", ("step", step), ("ok", true), ("detail", detail), ("candidate", cand.Id),
+            ("weights", PortfolioWeights.SummaryLine()));
+    }
+
+    /// <summary>レジストリ + 重みを対で rollback（明示呼び出し・悪化時用）。</summary>
+    public bool TryRollbackOuter(string? reason = null)
+    {
+        RuntimeFlags.ApplyOuterLoopEffective();
+        if (_modelRegistry == null) return false;
+        var (ok, detail) = _modelRegistry.TryRollback(reason);
+        if (!ok)
+        {
+            _env.Log.Write("outer_rollback", ("ok", false), ("detail", detail));
+            return false;
+        }
+        var w = PortfolioWeights.Rollback();
+        _env.Log.Write("outer_rollback", ("ok", true), ("detail", detail), ("weights", w.Detail),
+            ("summary", _modelRegistry.StatsSummary()));
+        return true;
+    }
+
+    private static System.Collections.Generic.Dictionary<string, double> BuildCandidateWeightsFromStats(
+        GameKouryakuKun.Core.Intrinsic.IntrinsicContributionStats stats)
+    {
+        // 寄与票がある成分を厚く、無ければ info_gain_pe 寄り（S5 材料・自動昇格ではない）。
+        var counts = stats.ComponentChosenCounts();
+        long total = counts.Values.Sum();
+        var w = new System.Collections.Generic.Dictionary<string, double>();
+        if (total > 0)
+        {
+            foreach (var id in GameKouryakuKun.Core.Intrinsic.IntrinsicComponents.All)
+            {
+                double share = (double)counts.GetValueOrDefault(id) / total;
+                w[id] = 0.12 + 0.4 * share; // 根拠: 床 + 寄与比例（正規化は FromParameters）
+            }
+        }
+        else
+        {
+            w["info_gain_pe"] = 0.36;
+            w["controllability"] = 0.16;
+            w["reach_unknown"] = 0.16;
+            w["reversibility_options"] = 0.16;
+            w["skill_wm_long_term"] = 0.16;
+        }
+        return w;
     }
 
     private void FlushOuterRegistry(string reason)
@@ -2277,7 +2343,8 @@ public sealed class PlaySession
         try
         {
             _env.Log.Write("outer_registry", ("reason", reason), ("summary", _modelRegistry.StatsSummary()),
-                ("rollback", _modelRegistry.RollbackAvailable()), ("champion", _modelRegistry.ChampionId()));
+                ("rollback", _modelRegistry.RollbackAvailable()), ("champion", _modelRegistry.ChampionId()),
+                ("weights", PortfolioWeights.SummaryLine()));
         }
         catch (Exception e)
         {
@@ -2285,7 +2352,7 @@ public sealed class PlaySession
         }
     }
 
-private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
+    private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
     {
         RuntimeFlags.ApplyImportanceEffective();
         if (!RuntimeFlags.AttachImportance) { LatestImportance = null; return; }

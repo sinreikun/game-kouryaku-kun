@@ -25,6 +25,48 @@ public static class IntrinsicPortfolioWeights
     public const double Equal = 0.2;
     public static IReadOnlyDictionary<string, double> Default() =>
         IntrinsicComponents.All.ToDictionary(x => x, _ => Equal, StringComparer.Ordinal);
+
+    /// <summary>S7: Bundle Parameters から正規化。未知キー無視・欠落は残差均等。</summary>
+    public static IReadOnlyDictionary<string, double> FromParameters(IReadOnlyDictionary<string, double>? parameters)
+    {
+        var raw = new Dictionary<string, double>(StringComparer.Ordinal);
+        double known = 0;
+        if (parameters != null)
+        {
+            foreach (var id in IntrinsicComponents.All)
+            {
+                if (parameters.TryGetValue(id, out var v) && v > 0)
+                {
+                    raw[id] = v;
+                    known += v;
+                }
+            }
+        }
+        if (raw.Count == 0) return Default();
+        double missing = IntrinsicComponents.All.Count(id => !raw.ContainsKey(id));
+        double residual = Math.Max(0, 1.0 - known);
+        double fill = missing > 0 ? residual / missing : 0;
+        foreach (var id in IntrinsicComponents.All)
+            if (!raw.ContainsKey(id)) raw[id] = fill;
+        return NormalizeOrDefault(raw);
+    }
+
+    public static IReadOnlyDictionary<string, double> NormalizeOrDefault(IReadOnlyDictionary<string, double>? weights)
+    {
+        if (weights == null || weights.Count == 0) return Default();
+        var d = new Dictionary<string, double>(StringComparer.Ordinal);
+        double sum = 0;
+        foreach (var id in IntrinsicComponents.All)
+        {
+            double v = weights.TryGetValue(id, out var x) ? Math.Max(0, x) : 0;
+            d[id] = v;
+            sum += v;
+        }
+        if (sum <= 1e-9) return Default();
+        foreach (var id in IntrinsicComponents.All)
+            d[id] = d[id] / sum;
+        return d;
+    }
 }
 
 public sealed class IntrinsicActionScore
@@ -71,7 +113,8 @@ public sealed record IntrinsicMixInput(
     IReadOnlyList<string>? PeTags = null,
     int ExperimentInterruptsUsed = 0,
     int ExperimentBudget = ActiveExperimentBudget.DefaultMaxInterrupts,
-    string? SoftInterruptBlock = null);
+    string? SoftInterruptBlock = null,
+    IReadOnlyDictionary<string, double>? PortfolioWeights = null);
 
 /// <summary>
 /// S5 IntrinsicValueMixer: 既存 CandidateScore を WRAP してポートフォリオ Mixed を付ける。
@@ -84,7 +127,8 @@ public static class IntrinsicValueMixer
     public static IntrinsicMixerReport Mix(IntrinsicMixInput input)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var weights = IntrinsicPortfolioWeights.Default();
+        var weights = IntrinsicPortfolioWeights.NormalizeOrDefault(input.PortfolioWeights);
+        bool custom = input.PortfolioWeights != null;
         var peBoost = input.ShortHorizon?.PredictionMiss == true ? 0.15 : 0.0;   // 根拠: PE miss 時の情報利得代理ブースト（小さい形式補正）
         if (input.PeTags?.Contains(PeRoutingTags.RepresentationCoarse) == true) peBoost = Math.Max(peBoost, 0.1);
 
@@ -107,7 +151,7 @@ public static class IntrinsicValueMixer
                 Action = c.Action,
                 Mixed = Math.Round(mixed, 4),
                 Components = comp.ToDictionary(kv => kv.Key, kv => Math.Round(kv.Value, 4)),
-                Method = "portfolio_equal_v1",
+                Method = custom ? "portfolio_applied_v1" : "portfolio_equal_v1",
                 Note = "skill_wm_long_term=not_implemented; not_reward",
             });
         }

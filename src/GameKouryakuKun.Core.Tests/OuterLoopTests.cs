@@ -1,4 +1,6 @@
 using GameKouryakuKun.Core.Outer;
+using GameKouryakuKun.Core.Intrinsic;
+using GameKouryakuKun.Core.Causality;
 using GameKouryakuKun.Storage;
 using Xunit;
 
@@ -183,9 +185,13 @@ public class OuterLoopTests : IDisposable
         Assert.Contains("Rollback", text);
         Assert.DoesNotContain("本番コードの自動書き換えはする", text);
         Assert.True(File.Exists(Path.Combine(root, "src", "audit", "v0.37.0.md")));
+        Assert.True(File.Exists(Path.Combine(root, "src", "audit", "v0.37.1.md")));
+        Assert.Contains("experience", text.ToLowerInvariant());
+        Assert.Contains("weight", text.ToLowerInvariant());
         var fa = File.ReadAllText(Path.Combine(root, "future-architecture.md"));
-        Assert.Contains("v0.37.0", fa);
+        Assert.Contains("v0.37.1", fa);
         Assert.Contains("S7 Outer", fa);
+        Assert.Contains("S7 クローズ可", fa);
     }
 
     [Fact]
@@ -199,5 +205,132 @@ public class OuterLoopTests : IDisposable
         Assert.Contains("OuterLoopEvaluator.Compare", ses);
         Assert.Contains("OuterLoopPromoteEnabled", ses);
         Assert.Contains("ApplyOuterLoopEffective", ses);
+        Assert.Contains("OuterMetricSnapshotBuilder", ses);
+        Assert.Contains("PortfolioWeights", ses);
+        Assert.Contains("TryRollbackOuter", ses);
+        Assert.DoesNotContain("intrinsic_fixture_v1", ses);
     }
+
+    [Fact]
+    public void Fixture_metric_path_still_works()
+    {
+        var m = OuterMetricSnapshotBuilder.Fixture(0.4, 0.2, 0.2, 12);
+        Assert.Equal(OuterMetricSnapshotBuilder.MethodFixture, m.Method);
+        var r = OuterLoopEvaluator.Compare(Champ(), Cand(), OuterMetricSnapshotBuilder.Fixture(0.5), m);
+        Assert.True(r.CanPromote);
+    }
+
+    [Fact]
+    public void Experience_pair_uses_same_slice_and_partial_when_sparse()
+    {
+        var stats = new IntrinsicContributionStats();
+        stats.NoteMixStep();
+        var pe = new PeClosedLoopRecorder();
+        var (c, d, note) = OuterMetricSnapshotBuilder.PairOnSameSlice(
+            stats, pe, null,
+            IntrinsicPortfolioWeights.Default(),
+            new Dictionary<string, double> { ["info_gain_pe"] = 0.5, ["controllability"] = 0.125, ["reach_unknown"] = 0.125, ["reversibility_options"] = 0.125, ["skill_wm_long_term"] = 0.125 });
+        Assert.Equal(c.Method, d.Method);
+        Assert.Equal(OuterMetricSnapshotBuilder.MethodPartial, c.Method);
+        Assert.Contains("same_slice", note);
+        Assert.Equal(c.CalibrationGapProxy, d.CalibrationGapProxy);
+        Assert.Equal(c.SampleN, d.SampleN);
+    }
+
+    [Fact]
+    public void Experience_pair_full_when_enough_mix_or_pe()
+    {
+        var stats = new IntrinsicContributionStats();
+        for (int i = 0; i < 8; i++) stats.NoteMixStep();
+        var pe = new PeClosedLoopRecorder();
+        var (c, d, _) = OuterMetricSnapshotBuilder.PairOnSameSlice(
+            stats, pe, null, IntrinsicPortfolioWeights.Default(), IntrinsicPortfolioWeights.Default());
+        Assert.Equal(OuterMetricSnapshotBuilder.MethodExperience, c.Method);
+        Assert.Equal(c.PeProxy, d.PeProxy); // no weight delta / no fell → same PE
+    }
+
+    [Fact]
+    public void Promote_applies_weights_and_rollback_restores()
+    {
+        using var d = new TempDir();
+        using var reg = ModelRegistryStore.Open(d["p"], "0.37.1");
+        var state = new PortfolioWeightState();
+        var before = state.Current[IntrinsicComponents.InfoGainPe];
+        Assert.Equal(IntrinsicPortfolioWeights.Equal, before);
+
+        var champ = reg.GetBundle(reg.ChampionId()!)!;
+        var cand = new ModelBundleSpec
+        {
+            Id = "candidate/weights-apply@1",
+            Kind = ModelBundleKinds.Weights,
+            ParentId = champ.Id,
+            Hypothesis = "boost info",
+            Origin = "fixture",
+            Parameters = new Dictionary<string, double>
+            {
+                ["info_gain_pe"] = 0.5,
+                ["controllability"] = 0.125,
+                ["reach_unknown"] = 0.125,
+                ["reversibility_options"] = 0.125,
+                ["skill_wm_long_term"] = 0.125,
+            },
+        };
+        reg.AddCandidate(cand);
+        var cmp = OuterLoopEvaluator.Compare(champ, cand, OuterMetricSnapshotBuilder.Fixture(0.5), OuterMetricSnapshotBuilder.Fixture(0.3, info: 0.2));
+        Assert.True(cmp.CanPromote);
+        reg.RecordComparison(cmp);
+
+        var applied = state.ApplyFromBundle(cand);
+        Assert.True(applied.Ok);
+        Assert.True(state.Current[IntrinsicComponents.InfoGainPe] > before);
+
+        var (ok, _) = reg.TryPromote(cand.Id, true);
+        Assert.True(ok);
+        Assert.Equal(cand.Id, reg.ChampionId());
+
+        var report = IntrinsicValueMixer.Mix(new IntrinsicMixInput(
+            new[] { FakeCand("A", info: 0.5, unc: 0.2) }, PortfolioWeights: state.Current));
+        Assert.Equal("portfolio_applied_v1", report.Scores[0].Method);
+
+        Assert.True(reg.TryRollback("test").Ok);
+        Assert.True(state.Rollback().Ok);
+        Assert.Equal(IntrinsicPortfolioWeights.Equal, state.Current[IntrinsicComponents.InfoGainPe], 3);
+        Assert.Equal(champ.Id, reg.ChampionId());
+    }
+
+    [Fact]
+    public void Code_edit_weights_apply_rejected()
+    {
+        var state = new PortfolioWeightState();
+        var bad = Cand(kind: ModelBundleKinds.CodeEdit);
+        var (ok, detail) = state.ApplyFromBundle(bad);
+        Assert.False(ok);
+        Assert.Contains("kind_not_weights", detail);
+    }
+
+    [Fact]
+    public void Mixer_uses_applied_portfolio_weights()
+    {
+        var c = FakeCand("x", info: 0.8, unc: 0.1);
+        var equal = IntrinsicValueMixer.Mix(new IntrinsicMixInput(new[] { c }));
+        var heavy = IntrinsicPortfolioWeights.FromParameters(new Dictionary<string, double>
+        {
+            ["info_gain_pe"] = 0.8,
+            ["controllability"] = 0.05,
+            ["reach_unknown"] = 0.05,
+            ["reversibility_options"] = 0.05,
+            ["skill_wm_long_term"] = 0.05,
+        });
+        var applied = IntrinsicValueMixer.Mix(new IntrinsicMixInput(new[] { c }, PortfolioWeights: heavy));
+        Assert.Equal("portfolio_equal_v1", equal.Scores[0].Method);
+        Assert.Equal("portfolio_applied_v1", applied.Scores[0].Method);
+        Assert.True(applied.Scores[0].Mixed >= equal.Scores[0].Mixed - 1e-9);
+    }
+
+    private static GameKouryakuKun.Core.Exploration.CandidateScore FakeCand(string action, double info = 0, double unc = 0) =>
+        new(action, info + unc, 0, 0, 0, 0, info, unc, 1.0, false, false, Array.Empty<string>())
+        {
+            InfoTerm = info, UncTerm = unc, Discovery = 0, Leave = 0, Change = 0, Text = 0,
+        };
 }
+
