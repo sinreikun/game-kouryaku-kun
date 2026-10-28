@@ -556,6 +556,9 @@ public sealed class PlaySession
         RuntimeFlags.ApplyBundleEffective();
         Emit(RuntimeFlags.BundleStatusText() + "（S2・探索挙動は変えません）",
             RuntimeFlags.AttachObservationBundle ? LogLevel.Ok : LogLevel.Info);
+        RuntimeFlags.ApplyCausalWmEffective();
+        Emit(RuntimeFlags.CausalWmStatusText() + "（S3・探索挙動は変えません）",
+            RuntimeFlags.AttachCausalWm ? LogLevel.Ok : LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled)));
@@ -658,7 +661,7 @@ public sealed class PlaySession
         // 画面ごとの時間的な変化（待つ手・手と手の間の入力なしの変化）を、記録から数え直す（出どころは記録そのもの）
         var temporal = new TemporalBook();
         // v0.27.0: 画面ごとの入力なしの自然な変化の基準。保存がなければ空から（それまでは従来どおり待つ手の実績を使う）
-        var natural = new NaturalBaseline(); explorer.Baseline = natural;
+        var natural = new NaturalBaseline(); explorer.Baseline = natural; ExploreBaseline = natural;
         // v0.28.1: 待つ手の情報の値打ち＝入力なしで何が起きるかの不確かさのうち、手の効果の見分けに要る分（画面の変化・移り・画素の区画・文字の区画）
         explorer.WaitInfoValue = node =>
         {
@@ -1452,6 +1455,8 @@ public sealed class PlaySession
     public TextChangeBook TextBook { get; } = new();
     /// <summary>v0.28.0: 画素の区画（16×12）ごとの、手で変わる所と手によらず変わる所の区別</summary>
     public RegionCausality PixelRegions { get; } = new(GameKouryakuKun.Core.Ocr.TextReader.GridCols * GameKouryakuKun.Core.Ocr.TextReader.GridRows);
+    /// <summary>探索中の NaturalBaseline 参照（S3 Comparer 用。学習ロジックは触らない）。</summary>
+    public GameKouryakuKun.Core.Exploration.NaturalBaseline? ExploreBaseline { get; private set; }
     public TextTransitionLink TextLink { get; } = new();
     private readonly Dictionary<long, (bool Changed, List<string> Texts)> _textByStep = new();
     public long FgNaturalLinesExcluded;
@@ -1462,6 +1467,8 @@ public sealed class PlaySession
     public volatile GameKouryakuKun.Core.Observation.StructuredObservation? LatestObservation;
     /// <summary>S2: フラグ ON 時のみ Assembler が埋める Observation Bundle（探索・学習は参照しない）。</summary>
     public volatile GameKouryakuKun.Core.Observation.ObservationBundle? LatestObservationBundle;
+    /// <summary>S3: フラグ ON 時の H0–H4 比較（探索・学習は参照しない）。</summary>
+    public volatile GameKouryakuKun.Core.Causality.CausalComparisonRecord? LatestCausalComparison;
     /// <summary>v0.30.3: LatestObservation を作った画面（重ね表示をこの画面の上に描く）</summary>
     public volatile Tuple<GameKouryakuKun.Core.Observation.StructuredObservation, GameKouryakuKun.Core.Imaging.Frame>? LatestViewBox;
     public (GameKouryakuKun.Core.Observation.StructuredObservation Obs, GameKouryakuKun.Core.Imaging.Frame Frame)? LatestView
@@ -1571,7 +1578,8 @@ public sealed class PlaySession
                 LegacyStateBefore: curNode,
                 Inferred: inferred,
                 CallSite: "session_dual_append",
-                ObservationBundleJson: bundleJson);
+                ObservationBundleJson: bundleJson,
+                CausalComparisonJson: LatestCausalComparison?.ToJson());
 
             var result = VNextDualAppend.Try(ref _vnextKernel, _env.ProfileDataDir, AppEnv.Version,
                 new ActionSpec(ca.Name, actionSource), ctx,
@@ -1765,6 +1773,8 @@ public sealed class PlaySession
             ("entities", o.EntityLayer?.Candidates.Count), ("relations", o.EntityLayer?.Relations.Count), ("events", o.Prediction == null ? null : string.Join(",", o.Prediction.Occurred.Select(i => GameKouryakuKun.Core.Observation.LocalEventModel.Events[i]))));
         // v0.33.5 S2: Observation Bundle 派生（既定 OFF。探索・学習・GT は不変）
         TryAttachObservationBundle(o, step);
+        // v0.33.7 S3: Causal WM 比較（既定 OFF）
+        TryAttachCausalWm(o, step);
     }
 
     /// <summary>
@@ -1809,9 +1819,11 @@ public sealed class PlaySession
     {
         try
         {
-            if (LatestObservationBundle is { } cached && cached.Step == o.Step) return cached;
+            if (LatestObservationBundle is { } cached && cached.Step == o.Step
+                && (LatestCausalComparison == null || cached.CausalComparison != null)) return cached;
             lock (EntityExp)
-                return GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(o, entityExperience: EntityExp);
+                return GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(
+                    o, entityExperience: EntityExp, causalComparison: LatestCausalComparison);
         }
         catch (Exception e)
         {
@@ -1819,6 +1831,69 @@ public sealed class PlaySession
             return null;
         }
     }
+
+    /// <summary>
+    /// S3 Causal WM: H0–H4 比較を既存 NaturalBaseline / RegionCausality / delayed から派生。
+    /// <see cref="RuntimeFlags.AttachCausalWm"/> 既定 OFF（GKK_ATTACH_CAUSAL_WM=1）。
+    /// </summary>
+    private void TryAttachCausalWm(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
+    {
+        RuntimeFlags.ApplyCausalWmEffective();
+        if (!RuntimeFlags.AttachCausalWm) { LatestCausalComparison = null; return; }
+        try
+        {
+            // Prefer residual / region cells if present; RegionLayer stores bbox only — use Entity residual when available.
+            IReadOnlyCollection<int>? changedCells = o.EntityLayer?.ResidualCells;
+            if (changedCells == null || changedCells.Count == 0)
+            {
+                // Synthesize cell indices from region bbox for coarse contrast (formal grid indices).
+                var list = new List<int>();
+                int cols = ObsBuilder.Cols;
+                foreach (var r in o.Regions.Regions)
+                    for (int y = r.Y0; y <= r.Y1; y++)
+                        for (int x = r.X0; x <= r.X1; x++)
+                            list.Add(y * cols + x);
+                changedCells = list;
+            }
+            bool trackUnstable = o.EntityLayer?.Candidates.Any(c => c.IdentityPosterior is <= 0 || (!c.Continuous && !c.New)) == true;
+            var input = new GameKouryakuKun.Core.Causality.CausalCompareInput(
+                Step: step,
+                Action: o.Action,
+                Node: o.Before,
+                Changed: o.Regions.ChangedCells > 0 || (o.Temporal.Changed),
+                Provenance: o.Provenance,
+                NaturalBaseline: ExploreBaseline,
+                RegionCausality: PixelRegions,
+                ChangedCells: changedCells,
+                DelayedPresent: o.Temporal.Delayed != null,
+                DelayedCells: o.Temporal.Delayed?.Cells,
+                TrackUnstableHint: trackUnstable,
+                ResidualCellCount: o.EntityLayer?.ResidualCells?.Count);
+            var rec = GameKouryakuKun.Core.Causality.CausalHypothesisComparer.Compare(input);
+            LatestCausalComparison = rec;
+            // Refresh Bundle with causal if attach-bundle also on
+            if (LatestObservationBundle != null && RuntimeFlags.AttachObservationBundle)
+            {
+                lock (EntityExp)
+                    LatestObservationBundle = GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(
+                        o, entityExperience: EntityExp, causalComparison: rec);
+            }
+            _env.Log.Write("causal_wm",
+                ("step", step),
+                ("preferred", rec.Preferred),
+                ("tags", string.Join(",", rec.PeRoutingTags)),
+                ("sources", string.Join(",", rec.EvidenceSources)),
+                ("h0", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H0Natural)?.Status),
+                ("h1", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H1Immediate)?.Status),
+                ("h2", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H2Delayed)?.Status));
+        }
+        catch (Exception e)
+        {
+            LatestCausalComparison = null;
+            _env.Log.Write("causal_wm_failed", ("step", step), ("error", e.Message));
+        }
+    }
+
     public SelfGoals? Goals { get; private set; }
     private int _goalEventsLogged;
     /// <summary>目的の欄の表示（探索のスレッドで作った文字列だけを渡す）</summary>

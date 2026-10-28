@@ -189,4 +189,28 @@ public static class RuntimeFlags
             ? "Observation Bundle attach: ON（環境変数 GKK_ATTACH_OBSERVATION_BUNDLE=1）"
             : "Observation Bundle attach: OFF（既定）";
     }
+
+    // --- S3 Causal WM 診断フラグ（docs/s3-causal-wm-contract.md §4）---
+
+    /// <summary>環境変数名。=1 で Session が H0–H4 比較をログする（既定 OFF）。</summary>
+    public const string CausalWmEnvName = "GKK_ATTACH_CAUSAL_WM";
+
+    /// <summary>Causal WM 比較を診断へ付けるか。env のみ。</summary>
+    public static bool AttachCausalWm { get; set; }
+
+    public static bool CausalWmEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(CausalWmEnvName), "1", StringComparison.Ordinal);
+
+    public static void ApplyCausalWmEffective()
+    {
+        AttachCausalWm = CausalWmEnvForcesOn;
+    }
+
+    public static string CausalWmStatusText()
+    {
+        ApplyCausalWmEffective();
+        return AttachCausalWm
+            ? "Causal WM attach: ON（環境変数 GKK_ATTACH_CAUSAL_WM=1）"
+            : "Causal WM attach: OFF（既定）";
+    }
 }

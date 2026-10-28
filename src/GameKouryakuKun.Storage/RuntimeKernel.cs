@@ -23,7 +23,7 @@ public sealed class RuntimeKernel : IDisposable
     public ExperienceVNextStore Store => _store;
     public string VNextPath => _store.Path;
 
-    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.6", Func<DateTime>? utcNow = null)
+    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.7", Func<DateTime>? utcNow = null)
     {
         _store = store;
         _appVersion = appVersion;
@@ -40,7 +40,7 @@ public sealed class RuntimeKernel : IDisposable
     }
 
     /// <summary>profileDataDir 配下の experience-vnext.sqlite を開く（memory.sqlite には触れない）。</summary>
-    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.6", Func<DateTime>? utcNow = null)
+    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.7", Func<DateTime>? utcNow = null)
     {
         var path = ExperienceVNextStore.DefaultPath(profileDataDir);
         var store = ExperienceVNextStore.Open(path, appVersion, utcNow);
@@ -88,6 +88,7 @@ public sealed class RuntimeKernel : IDisposable
             },
             ["legacy_state_before"] = ctx.LegacyStateBefore,
             ["legacy_structured_json"] = resolved.LegacyStructuredJson,
+            ["causal_comparison_json"] = string.IsNullOrWhiteSpace(ctx.CausalComparisonJson) ? null : ctx.CausalComparisonJson,
             ["inferred"] = inferred,
         });
 
@@ -214,7 +215,9 @@ public sealed record StepContext(
     /// S2: Observation Bundle JSON。あれば Kernel の正規観測面（ObservationKind=Bundle）。
     /// 学習は Session の StructuredObservation / memory.sqlite のまま。必須にしない（既定 dual-append OFF）。
     /// </summary>
-    string? ObservationBundleJson = null);
+    string? ObservationBundleJson = null,
+    /// <summary>S3: CausalComparisonRecord JSON（診断・provenance。学習しない）。</summary>
+    string? CausalComparisonJson = null);
 
 /// <summary>Step の結果。フラグ OFF なら Wrote=false。CanonicalSurface は bundle/structured/legacy_coarse/absent。</summary>
 public sealed record StepResult(bool Wrote, bool SkippedBecauseFlagOff, long? ExperienceId, ExperienceRecord? Record, string? CanonicalSurface = null);

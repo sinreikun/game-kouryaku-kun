@@ -7,8 +7,8 @@ namespace GameKouryakuKun.Core.Observation;
 /// </summary>
 public static class SensorStackAssembler
 {
-    public const string AssemblerId = "sensor_stack_assembler@2";
-    public const string AssemblerVersion = "2";
+    public const string AssemblerId = "sensor_stack_assembler@3";
+    public const string AssemblerVersion = "3";
 
     /// <summary>
     /// 主経路: 現行 StructuredObservation から Bundle を作る（純粋・副作用なし）。
@@ -18,7 +18,8 @@ public static class SensorStackAssembler
         StructuredObservation obs,
         RawRef? raw = null,
         bool includeTextLines = false,
-        EntityExperience? entityExperience = null)
+        EntityExperience? entityExperience = null,
+        GameKouryakuKun.Core.Causality.CausalComparisonRecord? causalComparison = null)
     {
         ArgumentNullException.ThrowIfNull(obs);
 
@@ -44,6 +45,7 @@ public static class SensorStackAssembler
                     : LayerStatus.Observed),
             Temporal = string.IsNullOrEmpty(obs.Temporal.Status) ? LayerStatus.Observed : obs.Temporal.Status,
             EntityExperience = eeSnap == null ? LayerStatus.NotObserved : LayerStatus.Observed,
+            CausalComparison = causalComparison == null ? LayerStatus.NotObserved : LayerStatus.Observed,
         };
 
         CoordinateFrameResult? frame = gt == null ? null : CopyFrame(gt);
@@ -96,6 +98,7 @@ public static class SensorStackAssembler
             Numbers = numbers,
             Temporal = temporal,
             EntityExperience = eeSnap,
+            CausalComparison = causalComparison,
             Provenance = obs.Provenance,
             Layers = layers,
             Source = new BundleSource("structured_observation", obs.Schema, AssemblerId),

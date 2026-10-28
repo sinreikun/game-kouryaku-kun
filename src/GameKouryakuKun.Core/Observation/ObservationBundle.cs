@@ -9,7 +9,7 @@ namespace GameKouryakuKun.Core.Observation;
 /// </summary>
 public sealed record ObservationBundle
 {
-    public const int CurrentSchema = 2;   // 根拠: v0.33.6 で entity_experience 層を契約面に追加（docs/s2-sensor-stack-contract.md）
+    public const int CurrentSchema = 3;   // 根拠: v0.33.7 で causal_comparison 層を追加（docs/s3-causal-wm-contract.md）
 
     public int SchemaVersion { get; init; } = CurrentSchema;
     public long Step { get; init; }
@@ -24,6 +24,8 @@ public sealed record ObservationBundle
     public TemporalSnapshot? Temporal { get; init; }
     /// <summary>Track ごとの予測可能統計の派生スナップショット（EntityExperience KEEP）。無ければ layers で明示。</summary>
     public EntityExperienceSnapshot? EntityExperience { get; init; }
+    /// <summary>S3: H0–H4 比較結果（docs/s3-causal-wm-contract.md）。無ければ layers で明示。</summary>
+    public GameKouryakuKun.Core.Causality.CausalComparisonRecord? CausalComparison { get; init; }
     public string Provenance { get; init; } = "unknown";
     public LayerStatusMap Layers { get; init; } = new();
     public BundleSource Source { get; init; } = new("structured_observation", StructuredObservation.CurrentSchema, SensorStackAssembler.AssemblerId);
@@ -152,6 +154,7 @@ public sealed record LayerStatusMap
     public string Numbers { get; init; } = LayerStatus.NotImplemented;
     public string Temporal { get; init; } = LayerStatus.NotImplemented;
     public string EntityExperience { get; init; } = LayerStatus.NotImplemented;
+    public string CausalComparison { get; init; } = LayerStatus.NotImplemented;
 }
 
 public sealed record BundleSource(string Kind, int Schema, string Assembler);

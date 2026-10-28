@@ -212,6 +212,9 @@ public sealed class AppEnv : IDisposable
         RuntimeFlags.ApplyBundleEffective();
         summary.AppendLine(RuntimeFlags.BundleStatusText());
         summary.AppendLine($"observation_bundle_attach effective={RuntimeFlags.AttachObservationBundle} env={RuntimeFlags.BundleEnvForcesOn}");
+        RuntimeFlags.ApplyCausalWmEffective();
+        summary.AppendLine(RuntimeFlags.CausalWmStatusText());
+        summary.AppendLine($"causal_wm_attach effective={RuntimeFlags.AttachCausalWm} env={RuntimeFlags.CausalWmEnvForcesOn}");
         try
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
