@@ -66,6 +66,7 @@ public sealed class ExperienceVNextStore : IDisposable
         ObservationKind.Structured => "structured",
         ObservationKind.LegacyCoarse => "legacy_coarse",
         ObservationKind.Absent => "absent",
+        ObservationKind.Bundle => "bundle",
         _ => "absent",
     };
 

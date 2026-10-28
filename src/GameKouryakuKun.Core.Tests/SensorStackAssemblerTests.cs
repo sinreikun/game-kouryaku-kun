@@ -143,7 +143,7 @@ public class SensorStackAssemblerTests : IDisposable
         Assert.DoesNotContain("player", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("hero", json, StringComparison.OrdinalIgnoreCase);
         using var doc = JsonDocument.Parse(json);
-        Assert.Equal(1, doc.RootElement.GetProperty("schema_version").GetInt32());
+        Assert.Equal(ObservationBundle.CurrentSchema, doc.RootElement.GetProperty("schema_version").GetInt32());
     }
 
     [Fact]
@@ -164,18 +164,46 @@ public class SensorStackAssemblerTests : IDisposable
         var root = RepoRoot();
         Assert.True(File.Exists(Path.Combine(root, "docs", "s2-sensor-stack-contract.md")));
         Assert.True(File.Exists(Path.Combine(SrcRoot(), "audit", "v0.33.5.md")));
+        Assert.True(File.Exists(Path.Combine(SrcRoot(), "audit", "v0.33.6.md")));
         var contract = File.ReadAllText(Path.Combine(root, "docs", "s2-sensor-stack-contract.md"));
         Assert.Contains("Observation Bundle", contract);
         Assert.Contains("中央最大＝キャラ", contract);
         Assert.Contains("GKK_ATTACH_OBSERVATION_BUNDLE", contract);
+        Assert.Contains("EntityExperienceSnapshot", contract);
+        Assert.Contains("ObservationKind.Bundle", contract);
         Assert.DoesNotContain("しきい値を緩める", contract);
     }
 
     [Fact]
-    public void Entity_experience_stub_is_placeholder_only()
+    public void Entity_experience_snapshot_attaches_when_provided()
     {
-        IEntityExperienceStub stub = new EntityExperienceStubPlaceholder();
-        Assert.Equal("entity_experience/stub@0", stub.StubId);
+        var ee = new EntityExperience();
+        var prev = new EntityLayer(LayerStatus.Observed,
+            new[] { new EntityCandidate(0, 7, 1, 1, 3, 3, 2, 2, 9, "a", "A", 0, 0, false, false, false, 1, 3) { Continuous = true, IdentityPosterior = 5 } },
+            Array.Empty<int>(), Array.Empty<RelationObs>());
+        var cur = new EntityLayer(LayerStatus.Observed,
+            new[] { new EntityCandidate(0, 7, 1, 1, 3, 3, 2, 2, 9, "b", "A", 0, 0, false, true, false, 1, 3) { Continuous = true, IdentityPosterior = 5 } },
+            Array.Empty<int>(), Array.Empty<RelationObs>());
+        for (int i = 0; i < 5; i++) ee.Observe(prev, cur, "x", false, false);
+
+        var bundle = SensorStackAssembler.FromStructured(MinimalObs(), entityExperience: ee);
+        Assert.Equal(LayerStatus.Observed, bundle.Layers.EntityExperience);
+        Assert.NotNull(bundle.EntityExperience);
+        Assert.True(bundle.EntityExperience!.Observed >= 5);
+        Assert.Contains(bundle.EntityExperience.Tables, tb => tb.Table == "appearance");
+        Assert.Equal("b", ee.Predict(0, 7, "a", "x")); // algorithm unchanged
+        var json = bundle.ToJson();
+        Assert.Contains("entity_experience", json);
+        Assert.DoesNotContain("キャラ", json);
+        Assert.DoesNotContain("1-2 区画", json); // TrackQuality bins stay human-only
+    }
+
+    [Fact]
+    public void Entity_experience_missing_is_not_observed_not_invented()
+    {
+        var bundle = SensorStackAssembler.FromStructured(MinimalObs());
+        Assert.Equal(LayerStatus.NotObserved, bundle.Layers.EntityExperience);
+        Assert.Null(bundle.EntityExperience);
     }
 
     private static string RepoRoot()

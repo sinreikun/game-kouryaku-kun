@@ -2,7 +2,7 @@
 
 - 文書: `docs/s2-sensor-stack-contract.md`
 - 拘束上位: `future-architecture.md`（特に §6 Observation / Sensor Stack、§7 Candidate/Track/Entity、§30 S2）
-- 版: S2-contract-0.1（2026-10-28）
+- 版: S2-contract-0.2（2026-10-28 / v0.33.6）
 - 対象 Stage: **S2**（Sensor Stack の単一契約面。アルゴリズムは KEEP）
 
 本契約は実装可能な短い仕様である。Global Transform / Track 同一性 / Explorer / Goal / P-7 / しきい値 / 学習は **変更しない**。
@@ -17,104 +17,67 @@
 | CoordinateFrame | Global Transform 仮説集合と採用結果・confidence（v0.32.9 KEEP） |
 | ChangeField | 補償後の局所残差・出現消失（既存 Regions / ResidualCells の写像） |
 | Candidate / Track / Relation | §7。Identity ≠ Appearance。ゲーム意味禁止 |
-| Assembler | 既存 `StructuredObservation` 等から Bundle を **派生**する変換器（再計算しない） |
-| 旧観測経路 | 現行 Session → `StructuredObservation` → `memory.sqlite`（削除しない） |
+| EntityExperience スナップショット | Track ごとの予測可能統計の **読み取り専用コピー**（既存 `EntityExperience` KEEP） |
+| Assembler | 既存観測から Bundle を **派生**する変換器（再計算しない） |
+| 旧観測経路 | 現行 Session → `StructuredObservation` → `memory.sqlite`（削除しない・学習の正） |
+| Kernel 正規観測面 | `RuntimeKernel.Step` が Experience に書く観測。Bundle JSON があれば **Bundle** |
 
 ---
 
 ## 1. Observation Bundle フィールド（§6.1）
 
-論理型（実装: `ObservationBundle`）。1 Bundle = **1 アクション完了サイクルの観測面**。
+論理型（実装: `ObservationBundle`）。1 Bundle = **1 アクション完了サイクルの観測面**。`schema_version` 現行 **2**（entity_experience 層追加）。
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `schema_version` | int | はい | Bundle 契約版。現行 `1` |
+| `schema_version` | int | はい | Bundle 契約版。現行 `2` |
 | `step` | int64 | はい | 手番号（StructuredObservation.Step を写す） |
-| `raw` | object? | いいえ | 参照用。`{ "kind": "none"\|"frame_ref", "hash"?: string }`。常時フル画素は保存しない |
-| `coordinate_frame` | CoordinateFrameResult? | 層 status 付き | GT 採用結果。無ければ層 status=`not_observed`/`not_implemented` |
-| `change_field` | ChangeFieldSnapshot? | 同上 | 補償後残差・領域。既存 Regions / ResidualCells |
-| `candidates` | CandidateSnapshot[] | はい（空可） | 今フレームの局所仮説。意味ラベルなし |
-| `tracks` | TrackSnapshot[] | はい（空可） | 時間的連続性の仮説（ID） |
-| `relations` | RelationSnapshot[] | はい（空可） | 距離・相対変位・隣接・重なり・同一運動 |
-| `text` | TextSnapshotRef? | 層 status 付き | OCR 観測の要約（文字列は観測事実。意味は下流） |
-| `numbers` | NumberSnapshotRef[] | はい（空可） | 数字系列（何の数かは持たない） |
-| `temporal` | TemporalSnapshot? | 層 status 付き | 境界時間・自然変化・delayed |
-| `provenance` | string | はい | `agent` \| `human` \| `wait` \| `supervisor_gap` \| 既存 Provenance 写し |
-| `layers` | LayerStatusMap | はい | 各層の `observed` / `inherited` / `not_observed` / `not_implemented` |
-| `source` | object | はい | `{ "kind": "structured_observation", "schema": 1, "assembler": "sensor_stack_assembler@1" }` |
+| `raw` | object? | いいえ | `{ "kind": "none"\|"frame_ref", "hash"?: string }`。常時フル画素は保存しない |
+| `coordinate_frame` | CoordinateFrameResult? | 層 status 付き | GT 採用結果 |
+| `change_field` | ChangeFieldSnapshot? | 同上 | 補償後残差・領域 |
+| `candidates` / `tracks` / `relations` | 配列 | はい（空可） | §7 形式コピー |
+| `text` / `numbers` | 要約 | 層 status | OCR 観測（意味は下流） |
+| `temporal` | TemporalSnapshot? | 層 status | 境界・自然変化・delayed |
+| `entity_experience` | EntityExperienceSnapshot? | 層 status | 表ヒット／追従組の集計コピー。無ければ `layers.entity_experience=not_observed` |
+| `provenance` | string | はい | agent / human / wait / supervisor_gap 等 |
+| `layers` | LayerStatusMap | はい | 各層 status（欠測捏造禁止） |
+| `source` | object | はい | `{ kind, schema, assembler: "sensor_stack_assembler@2" }` |
 
-**Meaning 欄を持たない。** API・JSON キー・列挙値にゲーム意味（キャラ・敵・扉等）と診断注釈「中央最大＝キャラ」を入れない。形式名のみ（`moved` / `appearance_changed` / `field` / `translation` 等）。
+**Meaning 欄を持たない。** 「中央最大＝キャラ」およびゲーム意味ラベルを Bundle / Kernel API に入れない。`TrackQuality` サイズビンは **人間診断のみ**（Bundle に載せない）。
 
-### 1.1 CoordinateFrameResult
+### 1.5 EntityExperienceSnapshot
 
-| フィールド | 由来（KEEP） |
+| フィールド | 由来（KEEP・コピーのみ） |
 |---|---|
-| `decision` | `GlobalTransformConfidence.Decision`（none/zero/translation/field） |
-| `accepted` | `Accepted` |
-| `method` | `Method` |
-| `p_field` / `p_translation` / `p_zero` / `p_none` | 各事後 |
-| `log_odds` | `LogOdds` |
-| `field` | `Field`（8 係数） |
-| `inliers` / `points` / `coverage` / `median_residual` / `error_reduction` / `continuity` | 同名 |
+| `observed` / `keys` / `dropped` | `EntityExperience` 集計 |
+| `tables[]` | 各表 `appearance` / `movement` / `relation` / `text_number` の Predicted/Hits（安定番号・不安定） |
+| `follows[]` | `Follows()` の TrackA/TrackB/Follow/Trials/LogBf（上限付き） |
 
-アルゴリズム・しきい値・BIC は触らない。値のコピーのみ。
-
-### 1.2 ChangeFieldSnapshot
-
-| フィールド | 由来 |
-|---|---|
-| `changed_cells` | `RegionLayer.ChangedCells` |
-| `raw_changed_cells` | `RegionLayer.RawChangedCells` |
-| `common_shift` | `RegionLayer.CommonShift` または EntityLayer |
-| `regions` | `ChangeRegion` の形式コピー（Id/Track/bbox/cells/causality 形式名・NewTrack） |
-| `residual_cells` | `EntityLayer.ResidualCells`（あれば） |
-
-### 1.3 CandidateSnapshot / TrackSnapshot / RelationSnapshot
-
-| 概念 | 由来 |
-|---|---|
-| Candidate | `EntityCandidate`（位置・Cells・Appearance 符号・Dx/Dy・Moved/AppearanceChanged/New/Confidence/Age/IdentityPosterior 等）。**AppearanceState は形式記号** |
-| Track | 候補から派生する ID 要約（Track Id・Age/Lifetime・Missing 相当は Disappeared リスト）＋ `TrackQuality` 集計が取れる場合のみ任意 |
-| Relation | `RelationObs`（Dx/Dy/Distance/Change/Adjacent/Overlap/SameMove） |
-
-EntityExperience 統計の本移植は **本スライス対象外**（スタブ／将来インタフェースのみ可）。
-
-### 1.4 text / numbers / temporal
-
-| 層 | 由来 |
-|---|---|
-| text | `TextLayer`（Status/ReadKind/DiffKind/Lines 要約・件数） |
-| numbers | `NumberObs` の形式コピー |
-| temporal | `TemporalLayer` + `DelayedChange`（あれば） |
-
-各層は `layers.*` に status を明示。欠測を推測で埋めない。
+アルゴリズム・しきい値・Bayes factor 定数は触らない。Assembler は `EntityExperience.Snapshot()` を呼ぶだけ。
 
 ---
 
-## 2. 既存型からの写像（REBUILD は表面のみ）
+## 2. 既存型からの写像
 
 | Bundle 面 | 既存 | 規則 |
 |---|---|---|
 | 全体 | `StructuredObservation` | 主入力。再解釈しない |
-| coordinate_frame | `EntityLayer.GlobalTransform` → `GlobalTransformConfidence` | null → 層 `not_observed` または EntityLayer 無しなら `not_implemented` |
-| change_field | `RegionLayer` + ResidualCells | Regions をコピー |
-| candidates/tracks/relations | `EntityLayer` | null → candidates/tracks/relations 空 + 層 `not_implemented` |
-| text/numbers | `TextLayer` | 既存 status を継承 |
-| temporal | `TemporalLayer` | 同上 |
-| provenance | `StructuredObservation.Provenance` | 写す |
-| TrackQuality / EntityExperience | 任意・後続 | Assembler は読まなくてよい（本スライス） |
+| coordinate_frame | `GlobalTransformConfidence` | null → not_observed / EntityLayer 無し → not_implemented |
+| change_field | Regions + ResidualCells | コピー |
+| candidates/tracks/relations | `EntityLayer` | 無し → 空 + not_implemented |
+| entity_experience | `EntityExperience`（任意引数） | null → not_observed（捏造しない） |
+| text/numbers/temporal | TextLayer / TemporalLayer | 既存 status |
 
-**KEEP:** CommonMotion / Global Transform 受け入れ数学、EntityTracker 同一性、しきい値。  
-**REBUILD:** Bundle という単一契約面と Assembler。
+**KEEP:** GT / Track / EntityExperience 学習。**REBUILD:** Bundle 契約面と Assembler / Kernel 正規面。
 
 ---
 
 ## 3. Sensor Stack 規則（§6.2）
 
-1. 画面から観測可能な量を開発者が消さない（マスク用途の分離は現行継承。本スライスでマスク変更なし）。
-2. CoordinateFrame は「多くの局所変位を一つの低次元変換が説明できるか」の証拠で決める（ゲーム意味なし）— **既存 GT の結果を写すだけ**。
-3. 説明できない局所変化は候補として残す（ResidualCells / Candidates）。
-4. OCR は観測。文字列の意味は下流が経験で付ける。
+1. 観測可能な量を消さない（本スライスでマスク変更なし）。
+2. CoordinateFrame は既存 GT 結果の写し。
+3. 説明できない局所変化は候補として残す。
+4. OCR は観測。意味は下流。
 
 ---
 
@@ -122,44 +85,44 @@ EntityExperience 統計の本移植は **本スライス対象外**（スタブ�
 
 | 経路 | 挙動 |
 |---|---|
-| 既定（現行） | Session が StructuredObservation を作り memory.sqlite に書く。**変更なし** |
-| Bundle 派生 | `SensorStackAssembler.FromStructured(obs)` が Bundle を返す（純粋関数・副作用なし） |
-| 診断フラグ | `RuntimeFlags.AttachObservationBundle`（環境変数 `GKK_ATTACH_OBSERVATION_BUNDLE=1`）。**既定 OFF** |
-| フラグ ON | Session が観測保存後に Bundle を組み立て、ログ `observation_bundle` に要約を書く。探索・学習・GT は不変 |
-| RuntimeKernel | StepContext に任意で `ObservationBundleJson` を載せられる（空シェル）。dual-append 既定は Bundle を必須にしない |
+| 既定探索 | Session → StructuredObservation → memory.sqlite。**学習の正。変更なし** |
+| Bundle 派生 | `SensorStackAssembler.FromStructured(obs, entityExperience?: …)` |
+| 診断フラグ | `GKK_ATTACH_OBSERVATION_BUNDLE=1`（既定 OFF）→ ログ `observation_bundle` |
+| dual-append ON | Session が Bundle を組み立て `StepContext.ObservationBundleJson` に渡す（Attach OFF でも可） |
+| RuntimeKernel | `ResolveObservation`: Bundle JSON があれば **正規面 = Bundle**（`ObservationKind.Bundle`、Experience.ObservationJson = Bundle）。Structured は provenance.`legacy_structured_json` に残す |
+| Bundle 無し | 従来どおり Structured / LegacyCoarse / Absent |
 | PlaySession 置換 | **しない** |
 
-欠測ゼロ: Assembler は入力に無い層を捏造せず `layers` で明示する。
+`StepResult.CanonicalSurface` ∈ `bundle` \| `structured` \| `legacy_coarse` \| `absent`。
+
+欠測ゼロ: 無い層は `layers` で明示。EntityExperience 未渡しは `not_observed`。
 
 ---
 
-## 5. 非目標（やらない）
+## 5. 非目標
 
-- P-7 並列化・しきい値緩和・GT/Track アルゴリズム変更
-- Explorer / Goal / Skill / Planning / 学習の変更
-- PlaySession の Runtime Kernel への全面置換
-- EntityExperience 本書き換え（インタフェース／スタブのみ可）
-- StructuredObservation 経路の削除（唯一経路化は後続）
-- ゲーム意味ラベル・「中央最大＝キャラ」の API 混入
-- GitHub Release / Bootstrap / `release/latest.json` 更新（本スライスはコード＋契約＋テスト）
-
----
-
-## 6. 合格条件（本スライス）
-
-1. 本契約書がリポジトリにある
-2. `ObservationBundle` モデルと `SensorStackAssembler` がある
-3. 合成 StructuredObservation から Bundle を組み立て、GT 信頼度フィールドが round-trip する
-4. 欠測層が `layers` で明示される（推測埋めなし）
-5. 単体テストが意味ラベル／「中央最大＝キャラ」を Bundle JSON に含まないことを検証する
-6. フラグ既定 OFF で探索挙動が変わらない（配線は no-op）
-7. `src/audit/v0.33.5.md` と `future-architecture.md` §30.1 の更新
+- P-7・しきい値・GT/Track/EntityExperience **アルゴリズム**変更
+- Explorer / Goal / 学習経路変更
+- PlaySession 全面置換
+- TrackQuality サイズビンを Bundle/AI API に混入
+- StructuredObservation 経路の削除
+- 「中央最大＝キャラ」の API 混入
+- GitHub Release / `latest.json`（親がレビュー後に判断）
 
 ---
 
-## 7. 次の微小ステップ（示唆）
+## 6. 合格条件（v0.33.6 スライス）
 
-1. 実機でフラグ ON の数手で Bundle ログ要約を確認（任意・挙動非変更のため必須ではない）
-2. EntityExperience を Bundle 付帯または別契約へ（アルゴリズム KEEP）
-3. Kernel Step が Bundle を正規入力として扱う（Session 分解の続き）
-4. その後 S3 Causal WM
+1. EntityExperience が Bundle に実スナップショットとして付く（スタブ廃止）
+2. Kernel が Bundle JSON を正規観測面として書く（Structured は provenance に残る）
+3. フラグ既定 OFF・dual-append 既定 OFF で探索挙動不変
+4. 単体テスト: EE 写像・Kernel Bundle 正規化・意味ラベル禁止
+5. `src/audit/v0.33.6.md` と §30.1 更新
+
+---
+
+## 7. 次の微小ステップ
+
+1. （任意）実機 dual-append + Bundle ログ確認
+2. S2 残り: Kernel API 固定の締め・診断 zip への Bundle 要約（任意）
+3. **S3 Causal WM**（P-7 には戻らない）

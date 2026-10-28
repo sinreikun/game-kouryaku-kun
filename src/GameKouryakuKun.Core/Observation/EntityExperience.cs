@@ -87,6 +87,34 @@ public sealed class EntityExperience
     public string? Predict(int table, int track, string ctx, string action) =>
         _c.TryGetValue((track, ctx, action, table), out var d) && d.Count > 0 ? d.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal).First().Key : null;
 
+    /// <summary>
+    /// S2: Bundle 付帯用の読み取り専用スナップショット。表・追従の集計をコピーするだけ（学習・しきい値・同一性は変えない）。
+    /// サイズビン（TrackQuality）は人間診断用のため含めない。
+    /// </summary>
+    public EntityExperienceSnapshot Snapshot(int maxFollows = 32)
+    {
+        // 根拠: Bundle 付帯の追従組上限（診断 zip 肥大化防止。全組が必要なら後続でページング）
+        var tables = new List<EntityExperienceTableStats>(4);
+        for (int ti = 0; ti < Tables.Length; ti++)
+        {
+            tables.Add(new EntityExperienceTableStats(
+                Tables[ti],
+                Predicted[ti, 0], Hits[ti, 0],
+                Predicted[ti, 1], Hits[ti, 1]));
+        }
+        var follows = Follows().Take(Math.Max(0, maxFollows))
+            .Select(f => new FollowPairSnapshot(f.A, f.B, f.Follow, f.Trials, f.LogBf))
+            .ToList();
+        return new EntityExperienceSnapshot
+        {
+            Observed = Observed,
+            Keys = Keys,
+            Dropped = Dropped,
+            Tables = tables,
+            Follows = follows,
+        };
+    }
+
     public string Summary()
     {
         static string R(long h, long p) => p == 0 ? "-" : $"{(double)h / p:0.00}";

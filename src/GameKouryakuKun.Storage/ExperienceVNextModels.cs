@@ -19,6 +19,8 @@ public enum ObservationKind
     Structured,
     LegacyCoarse,
     Absent,
+    /// <summary>S2: Observation Bundle が正規観測面（docs/s2-sensor-stack-contract.md）。</summary>
+    Bundle,
 }
 
 /// <summary>1 アクション完了サイクル分の経験。</summary>

@@ -872,5 +872,34 @@ CREATE TABLE model_bundles(
 );
 INSERT OR REPLACE INTO vnext_schema_meta(key, value) VALUES('contract', 's1-runtime-contract-0.1');
 """),
+        new Migration(2, "S2: observation_kind に bundle を追加（Observation Bundle 正規観測面）", """
+CREATE TABLE experiences_v2(
+  experience_id INTEGER PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  run_id INTEGER,
+  created_at TEXT NOT NULL,
+  action TEXT NOT NULL,
+  action_source TEXT NOT NULL CHECK(action_source IN ('agent','human','wait','unknown')),
+  observation_kind TEXT NOT NULL CHECK(observation_kind IN ('structured','legacy_coarse','absent','bundle')),
+  observation_json TEXT,
+  observation_schema_version INTEGER,
+  result_changed INTEGER,
+  result_next_state TEXT,
+  result_change_ratio REAL,
+  prediction_json TEXT,
+  surprisal REAL,
+  excess REAL,
+  model_bundle_id TEXT NOT NULL,
+  provenance_json TEXT NOT NULL,
+  source_db TEXT,
+  source_seq INTEGER
+);
+INSERT INTO experiences_v2 SELECT * FROM experiences;
+DROP TABLE experiences;
+ALTER TABLE experiences_v2 RENAME TO experiences;
+CREATE INDEX ix_experiences_seq ON experiences(seq);
+CREATE INDEX ix_experiences_bundle ON experiences(model_bundle_id);
+INSERT OR REPLACE INTO vnext_schema_meta(key, value) VALUES('contract', 's2-sensor-stack-contract-0.2');
+"""),
     };
 }

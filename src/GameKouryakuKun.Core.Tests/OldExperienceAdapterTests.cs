@@ -84,7 +84,7 @@ public class OldExperienceAdapterTests
         Assert.Contains("experiences", vnext.Db.Tables());
         Assert.Contains("loss_reports", vnext.Db.Tables());
         Assert.Contains("model_bundles", vnext.Db.Tables());
-        Assert.Equal(1, vnext.Db.SchemaVersion);
+        Assert.Equal(2, vnext.Db.SchemaVersion); // S2 migration: observation_kind bundle
         Assert.Equal(before, Sha256(oldPath));
         Assert.True(File.Exists(vnextPath));
         Assert.NotEqual(Path.GetFullPath(oldPath), Path.GetFullPath(vnextPath));

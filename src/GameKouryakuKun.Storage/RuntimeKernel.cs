@@ -23,7 +23,7 @@ public sealed class RuntimeKernel : IDisposable
     public ExperienceVNextStore Store => _store;
     public string VNextPath => _store.Path;
 
-    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.5", Func<DateTime>? utcNow = null)
+    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.6", Func<DateTime>? utcNow = null)
     {
         _store = store;
         _appVersion = appVersion;
@@ -35,12 +35,12 @@ public sealed class RuntimeKernel : IDisposable
             ["kind"] = "empty_shell",
             ["kernel_version"] = KernelVersion,
             ["app_version"] = _appVersion,
-            ["note"] = "S1 shell: plumbing only; no learning / sense / act",
+            ["note"] = "S2 shell: Bundle-canonical observation when present; no learning / sense / act",
         }));
     }
 
     /// <summary>profileDataDir 配下の experience-vnext.sqlite を開く（memory.sqlite には触れない）。</summary>
-    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.5", Func<DateTime>? utcNow = null)
+    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.6", Func<DateTime>? utcNow = null)
     {
         var path = ExperienceVNextStore.DefaultPath(profileDataDir);
         var store = ExperienceVNextStore.Open(path, appVersion, utcNow);
@@ -50,21 +50,25 @@ public sealed class RuntimeKernel : IDisposable
     /// <summary>
     /// 契約の Step API。フラグ OFF なら追記せず Skipped。ON なら vNext へ 1 Experience を追記。
     /// sense/act/learn は実行しない（空シェル）。
+    /// ObservationBundleJson があるとき、それを正規観測面として ObservationKind=Bundle で書く（Structured は provenance に残す）。
     /// </summary>
     public StepResult Step(ActionSpec action, StepContext ctx)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!RuntimeFlags.UseExperienceVNextWriter)
-            return new StepResult(Wrote: false, SkippedBecauseFlagOff: true, ExperienceId: null, Record: null);
+            return new StepResult(Wrote: false, SkippedBecauseFlagOff: true, ExperienceId: null, Record: null, CanonicalSurface: null);
 
+        var resolved = ResolveObservation(ctx);
         var seq = ctx.Seq ?? _nextSeq;
         var created = SqliteDb.Iso(_now());
         var source = NormalizeSource(action.ActionSource, action.LogicalKey);
-        var bundle = string.IsNullOrWhiteSpace(ctx.ModelBundleId) ? ShellBundleId : ctx.ModelBundleId!;
+        var modelBundle = string.IsNullOrWhiteSpace(ctx.ModelBundleId) ? ShellBundleId : ctx.ModelBundleId!;
 
         var inferred = new List<Dictionary<string, object?>>();
-        if (bundle == ShellBundleId)
-            inferred.Add(new Dictionary<string, object?> { ["code"] = "model_bundle_placeholder", ["detail"] = $"{ShellBundleId} (S1 empty shell)" });
+        if (modelBundle == ShellBundleId)
+            inferred.Add(new Dictionary<string, object?> { ["code"] = "model_bundle_placeholder", ["detail"] = $"{ShellBundleId} (S2 empty shell)" });
+        if (resolved.PromotedFromStructured)
+            inferred.Add(new Dictionary<string, object?> { ["code"] = "observation_surface_bundle", ["detail"] = "ObservationBundleJson used as canonical; structured kept in provenance" });
         if (ctx.Inferred != null)
             foreach (var (code, detail) in ctx.Inferred)
                 inferred.Add(new Dictionary<string, object?> { ["code"] = code, ["detail"] = detail });
@@ -73,15 +77,17 @@ public sealed class RuntimeKernel : IDisposable
         {
             ["writer"] = "runtime_kernel",
             ["kernel_version"] = KernelVersion,
-            ["model_bundle_id"] = bundle,
+            ["model_bundle_id"] = modelBundle,
             ["shell"] = true,
             ["call_site"] = ctx.CallSite ?? "direct",
+            ["observation_surface"] = resolved.Surface,
             ["source"] = new Dictionary<string, object?>
             {
                 ["kind"] = ctx.CallSite == "session_dual_append" ? "session_dual_append" : "live_step_shell",
                 ["note"] = "empty shell: caller-supplied observation/result; learning remains on memory.sqlite",
             },
             ["legacy_state_before"] = ctx.LegacyStateBefore,
+            ["legacy_structured_json"] = resolved.LegacyStructuredJson,
             ["inferred"] = inferred,
         });
 
@@ -92,23 +98,76 @@ public sealed class RuntimeKernel : IDisposable
             CreatedAt: created,
             Action: action.LogicalKey,
             ActionSource: source,
-            ObservationKind: ctx.ObservationKind,
-            ObservationJson: ctx.ObservationJson,
-            ObservationSchemaVersion: ctx.ObservationSchemaVersion,
+            ObservationKind: resolved.Kind,
+            ObservationJson: resolved.ObservationJson,
+            ObservationSchemaVersion: resolved.SchemaVersion,
             ResultChanged: ctx.ResultChanged,
             ResultNextState: ctx.ResultNextState,
             ResultChangeRatio: ctx.ResultChangeRatio,
             PredictionJson: ctx.PredictionJson,
             Surprisal: ctx.Surprisal,
             Excess: ctx.Excess,
-            ModelBundleId: bundle,
+            ModelBundleId: modelBundle,
             ProvenanceJson: provenance,
             SourceDb: null,
             SourceSeq: null);
 
         var id = _store.AppendExperience(rec);
         if (seq >= _nextSeq) _nextSeq = seq + 1;
-        return new StepResult(Wrote: true, SkippedBecauseFlagOff: false, ExperienceId: id, Record: rec with { ExperienceId = id });
+        return new StepResult(Wrote: true, SkippedBecauseFlagOff: false, ExperienceId: id, Record: rec with { ExperienceId = id }, CanonicalSurface: resolved.Surface);
+    }
+
+    /// <summary>
+    /// Bundle JSON があれば正規観測面。無ければ呼び出し側の Structured / Legacy / Absent を維持。
+    /// Session 学習経路（memory.sqlite）は触らない。
+    /// </summary>
+    public static ResolvedObservation ResolveObservation(StepContext ctx)
+    {
+        if (!string.IsNullOrWhiteSpace(ctx.ObservationBundleJson))
+        {
+            int? schema = TryReadBundleSchema(ctx.ObservationBundleJson);
+            string? legacy = null;
+            bool promoted = false;
+            if (!string.IsNullOrWhiteSpace(ctx.ObservationJson)
+                && ctx.ObservationKind is ObservationKind.Structured or ObservationKind.LegacyCoarse)
+            {
+                legacy = ctx.ObservationJson;
+                promoted = ctx.ObservationKind == ObservationKind.Structured;
+            }
+            return new ResolvedObservation(
+                ObservationKind.Bundle,
+                ctx.ObservationBundleJson,
+                schema ?? ctx.ObservationSchemaVersion,
+                "bundle",
+                legacy,
+                promoted);
+        }
+
+        return new ResolvedObservation(
+            ctx.ObservationKind,
+            ctx.ObservationJson,
+            ctx.ObservationSchemaVersion,
+            ctx.ObservationKind switch
+            {
+                ObservationKind.Structured => "structured",
+                ObservationKind.LegacyCoarse => "legacy_coarse",
+                ObservationKind.Bundle => "bundle",
+                _ => "absent",
+            },
+            null,
+            false);
+    }
+
+    private static int? TryReadBundleSchema(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("schema_version", out var v) && v.TryGetInt32(out var n))
+                return n;
+        }
+        catch { /* ignore malformed; caller still stores raw */ }
+        return null;
     }
 
     private static string NormalizeSource(string? s, string action)
@@ -151,8 +210,20 @@ public sealed record StepContext(
     IReadOnlyList<(string Code, string Detail)>? Inferred = null,
     /// <summary>呼び出し経路（例 session_dual_append）。</summary>
     string? CallSite = null,
-    /// <summary>S2: 任意の Observation Bundle JSON（空シェルは必須にしない）。</summary>
+    /// <summary>
+    /// S2: Observation Bundle JSON。あれば Kernel の正規観測面（ObservationKind=Bundle）。
+    /// 学習は Session の StructuredObservation / memory.sqlite のまま。必須にしない（既定 dual-append OFF）。
+    /// </summary>
     string? ObservationBundleJson = null);
 
-/// <summary>Step の結果。フラグ OFF なら Wrote=false。</summary>
-public sealed record StepResult(bool Wrote, bool SkippedBecauseFlagOff, long? ExperienceId, ExperienceRecord? Record);
+/// <summary>Step の結果。フラグ OFF なら Wrote=false。CanonicalSurface は bundle/structured/legacy_coarse/absent。</summary>
+public sealed record StepResult(bool Wrote, bool SkippedBecauseFlagOff, long? ExperienceId, ExperienceRecord? Record, string? CanonicalSurface = null);
+
+/// <summary>Kernel が正規化した観測面。</summary>
+public sealed record ResolvedObservation(
+    ObservationKind Kind,
+    string? ObservationJson,
+    int? SchemaVersion,
+    string Surface,
+    string? LegacyStructuredJson,
+    bool PromotedFromStructured);

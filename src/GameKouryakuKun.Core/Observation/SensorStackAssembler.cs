@@ -2,21 +2,29 @@ namespace GameKouryakuKun.Core.Observation;
 
 /// <summary>
 /// S2 Sensor Stack Assembler（docs/s2-sensor-stack-contract.md）。
-/// 既存 StructuredObservation / GlobalTransformConfidence / EntityLayer を読み、Observation Bundle を派生する。
-/// GT・Track・しきい値の再計算はしない。欠測層は捏造せず layers で明示する。
+/// 既存 StructuredObservation / GlobalTransformConfidence / EntityLayer / EntityExperience を読み、Observation Bundle を派生する。
+/// GT・Track・しきい値・EntityExperience 学習の再計算はしない。欠測層は捏造せず layers で明示する。
 /// </summary>
 public static class SensorStackAssembler
 {
-    public const string AssemblerId = "sensor_stack_assembler@1";
-    public const string AssemblerVersion = "1";
+    public const string AssemblerId = "sensor_stack_assembler@2";
+    public const string AssemblerVersion = "2";
 
-    /// <summary>主経路: 現行 StructuredObservation から Bundle を作る（純粋・副作用なし）。</summary>
-    public static ObservationBundle FromStructured(StructuredObservation obs, RawRef? raw = null, bool includeTextLines = false)
+    /// <summary>
+    /// 主経路: 現行 StructuredObservation から Bundle を作る（純粋・副作用なし）。
+    /// entityExperience を渡すと集計スナップショットを付帯。null なら layers.entity_experience = not_observed。
+    /// </summary>
+    public static ObservationBundle FromStructured(
+        StructuredObservation obs,
+        RawRef? raw = null,
+        bool includeTextLines = false,
+        EntityExperience? entityExperience = null)
     {
         ArgumentNullException.ThrowIfNull(obs);
 
         var ent = obs.EntityLayer;
         var gt = ent?.GlobalTransform;
+        var eeSnap = entityExperience?.Snapshot();
         var layers = new LayerStatusMap
         {
             Raw = raw == null ? LayerStatus.NotObserved : LayerStatus.Observed,
@@ -35,6 +43,7 @@ public static class SensorStackAssembler
                     ? obs.Text.Status
                     : LayerStatus.Observed),
             Temporal = string.IsNullOrEmpty(obs.Temporal.Status) ? LayerStatus.Observed : obs.Temporal.Status,
+            EntityExperience = eeSnap == null ? LayerStatus.NotObserved : LayerStatus.Observed,
         };
 
         CoordinateFrameResult? frame = gt == null ? null : CopyFrame(gt);
@@ -86,6 +95,7 @@ public static class SensorStackAssembler
             Text = text,
             Numbers = numbers,
             Temporal = temporal,
+            EntityExperience = eeSnap,
             Provenance = obs.Provenance,
             Layers = layers,
             Source = new BundleSource("structured_observation", obs.Schema, AssemblerId),

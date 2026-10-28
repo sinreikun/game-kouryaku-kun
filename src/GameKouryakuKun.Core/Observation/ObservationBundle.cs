@@ -9,7 +9,7 @@ namespace GameKouryakuKun.Core.Observation;
 /// </summary>
 public sealed record ObservationBundle
 {
-    public const int CurrentSchema = 1;   // 根拠: Bundle 契約の最初の版（docs/s2-sensor-stack-contract.md）
+    public const int CurrentSchema = 2;   // 根拠: v0.33.6 で entity_experience 層を契約面に追加（docs/s2-sensor-stack-contract.md）
 
     public int SchemaVersion { get; init; } = CurrentSchema;
     public long Step { get; init; }
@@ -22,6 +22,8 @@ public sealed record ObservationBundle
     public TextSnapshotRef? Text { get; init; }
     public IReadOnlyList<NumberSnapshotRef> Numbers { get; init; } = Array.Empty<NumberSnapshotRef>();
     public TemporalSnapshot? Temporal { get; init; }
+    /// <summary>Track ごとの予測可能統計の派生スナップショット（EntityExperience KEEP）。無ければ layers で明示。</summary>
+    public EntityExperienceSnapshot? EntityExperience { get; init; }
     public string Provenance { get; init; } = "unknown";
     public LayerStatusMap Layers { get; init; } = new();
     public BundleSource Source { get; init; } = new("structured_observation", StructuredObservation.CurrentSchema, SensorStackAssembler.AssemblerId);
@@ -149,20 +151,31 @@ public sealed record LayerStatusMap
     public string Text { get; init; } = LayerStatus.NotImplemented;
     public string Numbers { get; init; } = LayerStatus.NotImplemented;
     public string Temporal { get; init; } = LayerStatus.NotImplemented;
+    public string EntityExperience { get; init; } = LayerStatus.NotImplemented;
 }
 
 public sealed record BundleSource(string Kind, int Schema, string Assembler);
 
 /// <summary>
-/// EntityExperience 本移植は後続。S2 スライスでは契約上のスタブ印のみ。
+/// EntityExperience の Bundle 付帯面（アルゴリズム KEEP・読み取り専用コピー）。
+/// 表名は形式的（appearance / movement / relation / text_number）。ゲーム意味禁止。
+/// TrackQuality サイズビンは人間診断のみのためここに載せない。
 /// </summary>
-public interface IEntityExperienceStub
+public sealed record EntityExperienceSnapshot
 {
-    /// <summary>将来 Track ごとの予測可能統計を Bundle 付帯する入口。本スライスでは未配線。</summary>
-    string StubId { get; }
+    public long Observed { get; init; }
+    public int Keys { get; init; }
+    public long Dropped { get; init; }
+    public IReadOnlyList<EntityExperienceTableStats> Tables { get; init; } = Array.Empty<EntityExperienceTableStats>();
+    public IReadOnlyList<FollowPairSnapshot> Follows { get; init; } = Array.Empty<FollowPairSnapshot>();
 }
 
-public sealed class EntityExperienceStubPlaceholder : IEntityExperienceStub
-{
-    public string StubId => "entity_experience/stub@0";
-}
+public sealed record EntityExperienceTableStats(
+    string Table,
+    long PredictedStable,
+    long HitsStable,
+    long PredictedUnstable,
+    long HitsUnstable);
+
+/// <summary>遅延追従の組（Track ID のみ。意味ラベルなし）。</summary>
+public sealed record FollowPairSnapshot(int TrackA, int TrackB, long Follow, long Trials, double LogBf);

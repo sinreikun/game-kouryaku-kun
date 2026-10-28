@@ -2,7 +2,7 @@
 
 - 文書: `future-architecture.md`
 - 作成: 2026-10-28（利用者指示 t112u）
-- 更新: 2026-10-28（t115u: S2 Sensor Stack 契約+Assembler 開始 / #158 GT 縦ロック）
+- 更新: 2026-10-28（t115u: S2 EE付帯+Kernel Bundle 正規面 / #158 GT 縦ロック）
 - 位置づけ: **現行コードを守る設計ではない**。最終目標と絶対原則だけを守り、現実装は KEEP / REBUILD / REMOVE / MISSING で評価する。
 - 本文書が承認されるまで、大規模な実装変更には着手しない。
 
@@ -740,7 +740,8 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 3. ~~旧 DB アダプタ垂直スライス~~ → `OldExperienceAdapter` + `experience-vnext.sqlite`（学習ロジック変更なし・旧 DB read-only・Session 未配線）
 4. ~~実機 Adapter Replay~~ / ~~Kernel 空シェル~~ / ~~dual-append~~ → `RuntimeKernel` + Session `VNextDualAppend`（`src/audit/v0.33.3.md`、既定 OFF・`GKK_USE_EXPERIENCE_VNEXT=1` で試験）。v0.33.4 で UI トグル（既定 OFF・env 優先）追加。
 5. ~~実機 #158（v0.33.4）で GT 縦（y+/y− field）ロック寄り~~ → FAIL 0・dual-append ON 一致。P-7 には戻らない。
-6. ~~S2 契約 + Assembler 縦スライス開始~~ → `docs/s2-sensor-stack-contract.md` + `SensorStackAssembler`（`src/audit/v0.33.5.md`）。GT/Track アルゴリズム KEEP。Observation Bundle を派生面として追加（既定 OFF・`GKK_ATTACH_OBSERVATION_BUNDLE=1`）。**次:** EntityExperience 付帯（KEEP）／Kernel が Bundle を正規入力化／その後 S3。
+6. ~~S2 契約 + Assembler 縦スライス開始~~ → `docs/s2-sensor-stack-contract.md` + `SensorStackAssembler`（`src/audit/v0.33.5.md`）。
+7. ~~EntityExperience Bundle 付帯 + Kernel Bundle 正規観測面~~ → `EntityExperience.Snapshot` / `ObservationKind.Bundle` / `ResolveObservation`（`src/audit/v0.33.6.md`、契約 0.2）。学習は Structured/memory.sqlite のまま。**次:** S2 締め（診断任意）→ **S3 Causal WM**（P-7 には戻らない）。
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。
 

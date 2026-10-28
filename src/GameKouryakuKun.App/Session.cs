@@ -1523,11 +1523,15 @@ public sealed class PlaySession
             string? obsJson = null;
             int? obsVer = null;
             var latest = LatestObservation;
+            string? bundleJson = null;
             if (latest != null)
             {
                 kind = ObservationKind.Structured;
                 obsJson = latest.ToJson();
                 obsVer = latest.Schema;
+                // S2: Kernel 正規観測面として Bundle を併記（学習は Structured / memory.sqlite のまま）
+                var forKernel = TryBuildBundleForKernel(latest);
+                if (forKernel != null) bundleJson = forKernel.ToJson();
             }
             else
             {
@@ -1566,7 +1570,8 @@ public sealed class PlaySession
                 Excess: so.Excess,
                 LegacyStateBefore: curNode,
                 Inferred: inferred,
-                CallSite: "session_dual_append");
+                CallSite: "session_dual_append",
+                ObservationBundleJson: bundleJson);
 
             var result = VNextDualAppend.Try(ref _vnextKernel, _env.ProfileDataDir, AppEnv.Version,
                 new ActionSpec(ca.Name, actionSource), ctx,
@@ -1772,7 +1777,9 @@ public sealed class PlaySession
         if (!RuntimeFlags.AttachObservationBundle) { LatestObservationBundle = null; return; }
         try
         {
-            var bundle = GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(o);
+            GameKouryakuKun.Core.Observation.ObservationBundle bundle;
+            lock (EntityExp)
+                bundle = GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(o, entityExperience: EntityExp);
             LatestObservationBundle = bundle;
             _env.Log.Write("observation_bundle",
                 ("step", step),
@@ -1783,7 +1790,10 @@ public sealed class PlaySession
                 ("candidates", bundle.Candidates.Count),
                 ("tracks", bundle.Tracks.Count),
                 ("relations", bundle.Relations.Count),
+                ("ee_observed", bundle.EntityExperience?.Observed),
+                ("ee_keys", bundle.EntityExperience?.Keys),
                 ("layer_cf", bundle.Layers.CoordinateFrame),
+                ("layer_ee", bundle.Layers.EntityExperience),
                 ("layer_cf_ent", bundle.Layers.Candidates),
                 ("changed_cells", bundle.ChangeField?.ChangedCells));
         }
@@ -1791,6 +1801,22 @@ public sealed class PlaySession
         {
             LatestObservationBundle = null;
             _env.Log.Write("observation_bundle_failed", ("step", step), ("error", e.Message));
+        }
+    }
+
+    /// <summary>S2: dual-append / Kernel 用に Bundle を派生（Attach フラグ OFF でも dual-append ON なら組む）。学習は触らない。</summary>
+    private GameKouryakuKun.Core.Observation.ObservationBundle? TryBuildBundleForKernel(GameKouryakuKun.Core.Observation.StructuredObservation o)
+    {
+        try
+        {
+            if (LatestObservationBundle is { } cached && cached.Step == o.Step) return cached;
+            lock (EntityExp)
+                return GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(o, entityExperience: EntityExp);
+        }
+        catch (Exception e)
+        {
+            _env.Log.Write("observation_bundle_kernel_failed", ("step", o.Step), ("error", e.Message));
+            return null;
         }
     }
     public SelfGoals? Goals { get; private set; }
