@@ -583,6 +583,9 @@ public static class HealthReport
         // S5 Intrinsic / Active Exp（表示のみ。学習報酬に使わない）
         AddIntrinsicFromLogs(cur, Add);
 
+        // S6 Goal/Skill（表示のみ。達成数を良し悪しに使わない）
+        AddStructuredGoalsFromLogs(cur, Add);
+
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();
         sb.AppendLine($"健全性レポート（ゲームに依らないシステム動作だけ。プレイ内容は評価しない）: 総合 {Mark(res.Overall)}");
@@ -769,6 +772,34 @@ public static class HealthReport
         }
         add("内発価値", "寄与・割込み", stats != null ? Level.Info : Level.NotTested,
             stats ?? $"mix {mix.Count}・interrupt applied {applied}（stats 未記録）");
+    }
+
+    /// <summary>S6: structured_goal / skill_record / plan_propose を件数表示（達成数は良し悪しに使わない）。</summary>
+    internal static void AddStructuredGoalsFromLogs(IReadOnlyList<JsonElement> cur, Action<string, string, Level, string> add)
+    {
+        static bool IsType(JsonElement e, string name) =>
+            e.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == name;
+        var goals = cur.Where(e => IsType(e, "structured_goal")).ToList();
+        var skills = cur.Where(e => IsType(e, "skill_record")).ToList();
+        var plans = cur.Where(e => IsType(e, "plan_propose")).ToList();
+        if (goals.Count == 0 && skills.Count == 0 && plans.Count == 0)
+        {
+            add("Goal/Skill", "Structured", Level.NotTested, "今回のログに structured_goal / skill_record / plan_propose なし（フラグ OFF か未実行）");
+            return;
+        }
+        string? gsum = null;
+        for (int i = goals.Count - 1; i >= 0; i--)
+        {
+            var s = Str(goals[i], "summary");
+            if (!string.IsNullOrEmpty(s)) { gsum = s; break; }
+        }
+        add("Goal/Skill", "ObservationGoal", goals.Count > 0 ? Level.Info : Level.NotTested,
+            gsum ?? $"structured_goal {goals.Count}（達成数は評価しない）");
+        add("Goal/Skill", "Skill", skills.Count > 0 ? Level.Info : Level.NotTested,
+            $"skill_record {skills.Count}・active_logged {skills.Count(e => Str(e, "status") == "active")}");
+        int soft = plans.Count(e => Str(e, "status") == "soft_adopt_available" || Str(e, "soft_adopt") == "True" || Str(e, "soft_adopt") == "true");
+        add("Goal/Skill", "Plan", plans.Count > 0 ? Level.Info : Level.NotTested,
+            $"plan_propose {plans.Count}・soft_adopt {soft}（wm_lookahead stub・Supervisor 非接着）");
     }
 
     private static IEnumerable<string> SafeLines(string path)

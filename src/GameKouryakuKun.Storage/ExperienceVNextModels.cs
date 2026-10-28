@@ -260,4 +260,28 @@ public static class RuntimeFlags
             ? "Intrinsic Mixer: ON（環境変数 GKK_USE_INTRINSIC_MIXER=1・並行ログ+条件付き active_experiment）"
             : "Intrinsic Mixer: OFF（既定・Explorer 同一）";
     }
+
+    // --- S6 Goal / Plan / Skill（docs/s6-goal-plan-skill-contract.md §4）---
+
+    /// <summary>環境変数名。=1 で ObservationGoal/Skill/Plan 並行ログ + 条件付き soft adopt（既定 OFF）。</summary>
+    public const string StructuredGoalsEnvName = "GKK_USE_STRUCTURED_GOALS";
+
+    public static bool UseStructuredGoals { get; set; }
+
+    public static bool StructuredGoalsEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(StructuredGoalsEnvName), "1", StringComparison.Ordinal);
+
+    public static void ApplyStructuredGoalsEffective()
+    {
+        UseStructuredGoals = StructuredGoalsEnvForcesOn;
+    }
+
+    public static string StructuredGoalsStatusText()
+    {
+        ApplyStructuredGoalsEffective();
+        return UseStructuredGoals
+            ? "Structured Goals: ON（環境変数 GKK_USE_STRUCTURED_GOALS=1・並行ログ+条件付き skill soft adopt）"
+            : "Structured Goals: OFF（既定・SelfGoals/Sequences 同一）";
+    }
+
 }

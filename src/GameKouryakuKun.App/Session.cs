@@ -421,6 +421,7 @@ public sealed class PlaySession
                 ("causal_wm", RuntimeFlags.AttachCausalWm), ("importance", RuntimeFlags.AttachImportance), ("intrinsic_mixer", RuntimeFlags.UseIntrinsicMixer), ("active_exp_interrupts", ActiveExperimentInterrupts), ("pe_enqueued", PeLoop.Enqueued), ("pe_pending", PeLoop.PendingCount),
                 ("pe_summary", RuntimeFlags.AttachCausalWm ? PeLoop.SummaryLine() : null),
                 ("intrinsic_stats", RuntimeFlags.UseIntrinsicMixer ? IntrinsicStats.SummaryLine() : null),
+                ("structured_goals", RuntimeFlags.UseStructuredGoals), ("skill_lib", RuntimeFlags.UseStructuredGoals ? SkillLibrary.SummaryLine() : null), ("structured_soft_adopts", StructuredSoftAdopts),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
                 ("input_sent", Delivery.Sent), ("input_delivered", Delivery.Delivered), ("input_failed", Delivery.Failed), ("input_reaction_observed", Delivery.ReactionObserved),
                 ("input_reacted", Delivery.Reacted), ("longest_no_reaction", Delivery.LongestNoReactionStreak), ("agent_steps", AgentSteps), ("human_steps", HumanSteps),
@@ -576,6 +577,8 @@ public sealed class PlaySession
             GameKouryakuKun.Core.Importance.LiveRoiPolicy.IsLiveEnabled(RuntimeFlags.AttachImportance) ? LogLevel.Ok : LogLevel.Info);
         RuntimeFlags.ApplyIntrinsicMixerEffective();
         Emit(RuntimeFlags.IntrinsicMixerStatusText(), RuntimeFlags.UseIntrinsicMixer ? LogLevel.Ok : LogLevel.Info);
+        RuntimeFlags.ApplyStructuredGoalsEffective();
+        Emit(RuntimeFlags.StructuredGoalsStatusText(), RuntimeFlags.UseStructuredGoals ? LogLevel.Ok : LogLevel.Info);
         if (RuntimeFlags.AttachCausalWm) Emit(PeLoop.SummaryLine(), LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
@@ -1184,10 +1187,26 @@ public sealed class PlaySession
             foreach (var sk in goals.SkillCandidates)
             {
                 // すでに同じ並びの候補がある（連続履歴から見つけた）ときは、目的での再利用の裏づけとして数えるだけ（状態は既存の規則のまま）
-                if (seqMiner.Has(sk.Steps)) { GoalSegmentSupport++; _env.Log.Write("goal_segment_existing", ("seq", st.Seq), ("steps", sk.Steps.ToList()), ("start", sk.Start), ("achieved", sk.Achieved), ("attempts", sk.Attempts)); continue; }
-                if (seqMiner.AddFromGoal(sk.Steps, sk.Start, sk.End, sk.Achieved, sk.Attempts, st.Seq) is { } se) { skillEvents.Add(se); SkillCandidates++; }
+                if (seqMiner.Has(sk.Steps)) { GoalSegmentSupport++; _env.Log.Write("goal_segment_existing", ("seq", st.Seq), ("steps", sk.Steps.ToList()), ("start", sk.Start), ("achieved", sk.Achieved), ("attempts", sk.Attempts)); }
+                else if (seqMiner.AddFromGoal(sk.Steps, sk.Start, sk.End, sk.Achieved, sk.Attempts, st.Seq) is { } se) { skillEvents.Add(se); SkillCandidates++; }
+                // S6: Skill 表面へ昇格（並び学習ロジックは seqMiner のまま）
+                RuntimeFlags.ApplyStructuredGoalsEffective();
+                if (RuntimeFlags.UseStructuredGoals)
+                {
+                    var sr = SkillLibrary.PromoteFromGoalSegment(sk.Steps, sk.Start, sk.End, sk.Achieved, sk.Attempts, "goal");
+                    if (sr != null)
+                        _env.Log.Write("skill_record", ("step", step), ("summary", sr.SummaryLine()), ("status", sr.Status),
+                            ("origin", sr.Origin), ("body", sr.Body.ToList()), ("conf", sr.EffectConfidence));
+                }
             }
             goals.SkillCandidates.Clear();
+            RuntimeFlags.ApplyStructuredGoalsEffective();
+            if (RuntimeFlags.UseStructuredGoals)
+            {
+                foreach (var sr in SkillLibrary.SyncFromMiner(seqMiner).Take(3))
+                    _env.Log.Write("skill_record", ("step", step), ("summary", sr.SummaryLine()), ("status", sr.Status),
+                        ("origin", sr.Origin), ("body", sr.Body.ToList()), ("conf", sr.EffectConfidence));
+            }
             foreach (var ev in skillEvents.Concat(isHuman ? Enumerable.Empty<SequenceEvent>() : seqMiner.Observe(st)))
             {
                 var nc = ev.Candidate;
@@ -1499,6 +1518,12 @@ public sealed class PlaySession
     /// <summary>S5: Intrinsic Mixer レポート（フラグ ON 時）。</summary>
     public volatile GameKouryakuKun.Core.Intrinsic.IntrinsicMixerReport? LatestIntrinsic;
     public int ActiveExperimentInterrupts;
+    /// <summary>S6: ObservationGoal / Plan（フラグ ON 時。並行ログ）。</summary>
+    public volatile GameKouryakuKun.Core.Goals.ObservationGoal? LatestObservationGoal;
+    public volatile GameKouryakuKun.Core.Goals.PlanProposal? LatestPlanProposal;
+    /// <summary>S6: Skill 表面（並び学習は ActionSequenceMiner のまま）。</summary>
+    public readonly GameKouryakuKun.Core.Goals.SkillMiner SkillLibrary = new();
+    public int StructuredSoftAdopts;
     /// <summary>S5: 寄与・割込み統計（フラグ ON 時。S7 メタ重み材料・本スライスは学習しない）。</summary>
     public readonly GameKouryakuKun.Core.Intrinsic.IntrinsicContributionStats IntrinsicStats = new();
     private readonly List<long> _activeExpInterruptSteps = new();
@@ -2267,9 +2292,61 @@ private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObse
             _env.Log.Write("goal_created", ("step", step), ("goal", g.Id), ("kind", g.Kind.ToString().ToLowerInvariant()), ("target", g.Target), ("action", g.TargetAction),
                 ("origin", g.Origin), ("plan", g.Plan.Select(p => $"{p.Node}:{p.Action}").ToList()), ("budget", g.Budget), ("unc_before", Math.Round(g.UncBefore, 4)));
         var name = goals.NextAction(explorer, model, cur, step);
-        if (name == null) return null;
+        if (name == null)
+        {
+            // S6: 失敗ヒントを並行ログ（計画をエピソード境界にしない）
+            RuntimeFlags.ApplyStructuredGoalsEffective();
+            if (RuntimeFlags.UseStructuredGoals && LatestObservationGoal != null)
+            {
+                var hint = GameKouryakuKun.Core.Goals.StructuredPlanner.FailureHint("abandon", g.EndReason ?? "next_null");
+                LatestPlanProposal = hint;
+                _env.Log.Write("plan_propose", ("step", step), ("summary", hint.SummaryLine()), ("status", hint.Status), ("note", hint.Note), ("soft_adopt", false));
+            }
+            return null;
+        }
         var a = explorer.Actions.FirstOrDefault(x => x.Name == name);
         if (a == null) { goals.Abandon("操作が見つからない", step); return null; }
+
+        RuntimeFlags.ApplyStructuredGoalsEffective();
+        if (RuntimeFlags.UseStructuredGoals)
+        {
+            // Skill sync は SkillCandidates flush / periodic SyncSkills で行う
+            var obs = GameKouryakuKun.Core.Goals.ObservationGoalBridge.FromSelfGoal(g);
+            LatestObservationGoal = obs;
+            _env.Log.Write("structured_goal", ("step", step), ("summary", obs.SummaryLine()),
+                ("pred", obs.Predicate.Id), ("pred_status", obs.Predicate.Status),
+                ("value", obs.ExpectedValue.Combined), ("legacy", obs.LegacyKind), ("status", obs.Status));
+
+            string legacyNext = name;
+            var plan = GameKouryakuKun.Core.Goals.StructuredPlanner.Propose(obs, SkillLibrary.Skills, cur, legacyNext);
+            LatestPlanProposal = plan;
+            bool soft = false;
+            if (plan.Status == "soft_adopt_available" && plan.ExpandedSkillId is int adoptId
+                && SkillLibrary.Skills.FirstOrDefault(s => s.Id == adoptId) is { } skill
+                && !string.Equals(skill.Body.Count > 0 ? skill.Body[0] : null, name, StringComparison.Ordinal))
+            {
+                // Soft adopt: 既存の Active ActionSequence マクロのみ（primitive 差し替えはしない）
+                string? seqName = skill.SequenceId is int q ? $"ActionSequence #{q}" : null;
+                var seqAct = explorer.Actions.FirstOrDefault(x =>
+                    x.Group == ActionGroup.Sequence && explorer.IsUserAllowed(x.Name)
+                    && ((seqName != null && x.Name == seqName)
+                        || (x.Steps != null && x.Steps.Select(s => s.Name).SequenceEqual(skill.Body))));
+                if (seqAct != null)
+                {
+                    a = seqAct;
+                    soft = true;
+                    StructuredSoftAdopts++;
+                }
+            }
+            _env.Log.Write("plan_propose", ("step", step), ("summary", plan.SummaryLine()), ("status", plan.Status),
+                ("first", plan.FirstAction), ("skill", plan.ExpandedSkillId), ("note", plan.Note),
+                ("soft_adopt", soft), ("legacy_next", legacyNext));
+            string reason = soft
+                ? $"目的 #{g.Id}: {g.Text}（{g.Steps + 1}/{g.Budget} 手目・soft_adopt=skill_macro）"
+                : $"目的 #{g.Id}: {g.Text}（{g.Steps + 1}/{g.Budget} 手目）";
+            return new ExploreChoice(a, reason, 0) { Rule = "goal" };
+        }
+
         return new ExploreChoice(a, $"目的 #{g.Id}: {g.Text}（{g.Steps + 1}/{g.Budget} 手目）", 0) { Rule = "goal" };
     }
 

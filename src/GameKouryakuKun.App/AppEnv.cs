@@ -224,6 +224,8 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine($"importance_attach effective={RuntimeFlags.AttachImportance} env={RuntimeFlags.ImportanceEnvForcesOn}");
         summary.AppendLine(GameKouryakuKun.Core.Importance.LiveRoiPolicy.StatusText(RuntimeFlags.AttachImportance));
         summary.AppendLine(RuntimeFlags.IntrinsicMixerStatusText());
+        RuntimeFlags.ApplyStructuredGoalsEffective();
+        summary.AppendLine(RuntimeFlags.StructuredGoalsStatusText());
         try
         {
             var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
