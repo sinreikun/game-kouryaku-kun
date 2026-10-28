@@ -162,4 +162,29 @@ public static class RuntimeFlags
             _ => "Experience vNext dual-append: OFF（既定）",
         };
     }
+
+    // --- S2 Observation Bundle 診断フラグ（docs/s2-sensor-stack-contract.md §4）---
+
+    /// <summary>環境変数名。=1 で Session が Bundle 要約をログする（既定 OFF・探索挙動は変えない）。</summary>
+    public const string BundleEnvName = "GKK_ATTACH_OBSERVATION_BUNDLE";
+
+    /// <summary>Observation Bundle を診断ログへ付けるか。env のみ（本スライスで UI 無し）。</summary>
+    public static bool AttachObservationBundle { get; set; }
+
+    public static bool BundleEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(BundleEnvName), "1", StringComparison.Ordinal);
+
+    /// <summary>Bundle フラグを env から再計算する（dual-append とは独立）。</summary>
+    public static void ApplyBundleEffective()
+    {
+        AttachObservationBundle = BundleEnvForcesOn;
+    }
+
+    public static string BundleStatusText()
+    {
+        ApplyBundleEffective();
+        return AttachObservationBundle
+            ? "Observation Bundle attach: ON（環境変数 GKK_ATTACH_OBSERVATION_BUNDLE=1）"
+            : "Observation Bundle attach: OFF（既定）";
+    }
 }

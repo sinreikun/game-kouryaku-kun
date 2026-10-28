@@ -209,6 +209,9 @@ public sealed class AppEnv : IDisposable
         RuntimeFlags.ApplyEffective();
         summary.AppendLine(RuntimeFlags.StatusText());
         summary.AppendLine($"vnext_dual_append effective={RuntimeFlags.UseExperienceVNextWriter} source={RuntimeFlags.EffectiveSource} ui={RuntimeFlags.UiEnabled} env={RuntimeFlags.EnvForcesOn}");
+        RuntimeFlags.ApplyBundleEffective();
+        summary.AppendLine(RuntimeFlags.BundleStatusText());
+        summary.AppendLine($"observation_bundle_attach effective={RuntimeFlags.AttachObservationBundle} env={RuntimeFlags.BundleEnvForcesOn}");
         try
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);

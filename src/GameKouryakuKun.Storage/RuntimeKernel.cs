@@ -23,7 +23,7 @@ public sealed class RuntimeKernel : IDisposable
     public ExperienceVNextStore Store => _store;
     public string VNextPath => _store.Path;
 
-    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.3", Func<DateTime>? utcNow = null)
+    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.5", Func<DateTime>? utcNow = null)
     {
         _store = store;
         _appVersion = appVersion;
@@ -40,7 +40,7 @@ public sealed class RuntimeKernel : IDisposable
     }
 
     /// <summary>profileDataDir 配下の experience-vnext.sqlite を開く（memory.sqlite には触れない）。</summary>
-    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.3", Func<DateTime>? utcNow = null)
+    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.5", Func<DateTime>? utcNow = null)
     {
         var path = ExperienceVNextStore.DefaultPath(profileDataDir);
         var store = ExperienceVNextStore.Open(path, appVersion, utcNow);
@@ -150,7 +150,9 @@ public sealed record StepContext(
     /// <summary>変換時の推定・欠落の明示（ゲーム意味禁止）。provenance に載せる。</summary>
     IReadOnlyList<(string Code, string Detail)>? Inferred = null,
     /// <summary>呼び出し経路（例 session_dual_append）。</summary>
-    string? CallSite = null);
+    string? CallSite = null,
+    /// <summary>S2: 任意の Observation Bundle JSON（空シェルは必須にしない）。</summary>
+    string? ObservationBundleJson = null);
 
 /// <summary>Step の結果。フラグ OFF なら Wrote=false。</summary>
 public sealed record StepResult(bool Wrote, bool SkippedBecauseFlagOff, long? ExperienceId, ExperienceRecord? Record);

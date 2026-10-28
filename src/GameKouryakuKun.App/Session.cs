@@ -553,6 +553,9 @@ public sealed class PlaySession
         RuntimeFlags.ApplyEffective();
         Emit(RuntimeFlags.StatusText() + "。学習 DB は従来どおり memory.sqlite です",
             RuntimeFlags.UseExperienceVNextWriter ? LogLevel.Ok : LogLevel.Info);
+        RuntimeFlags.ApplyBundleEffective();
+        Emit(RuntimeFlags.BundleStatusText() + "（S2・探索挙動は変えません）",
+            RuntimeFlags.AttachObservationBundle ? LogLevel.Ok : LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled)));
@@ -1457,6 +1460,8 @@ public sealed class PlaySession
     private int _shiftSamples;
     /// <summary>v0.30.0（P-1）: 最新の構造化した観測（重ね表示用。表示だけで選択・学習には使わない）</summary>
     public volatile GameKouryakuKun.Core.Observation.StructuredObservation? LatestObservation;
+    /// <summary>S2: フラグ ON 時のみ Assembler が埋める Observation Bundle（探索・学習は参照しない）。</summary>
+    public volatile GameKouryakuKun.Core.Observation.ObservationBundle? LatestObservationBundle;
     /// <summary>v0.30.3: LatestObservation を作った画面（重ね表示をこの画面の上に描く）</summary>
     public volatile Tuple<GameKouryakuKun.Core.Observation.StructuredObservation, GameKouryakuKun.Core.Imaging.Frame>? LatestViewBox;
     public (GameKouryakuKun.Core.Observation.StructuredObservation Obs, GameKouryakuKun.Core.Imaging.Frame Frame)? LatestView
@@ -1753,6 +1758,40 @@ public sealed class PlaySession
         _env.Log.Write("observation", ("step", step), ("schema", o.Schema), ("provenance", o.Provenance), ("text", o.Text.Status), ("lines", o.Text.Lines.Count), ("observed", o.Text.Observed), ("inherited", o.Text.Inherited),
             ("numbers", o.Text.Numbers.Count), ("regions", o.Regions.Regions.Count), ("changed_cells", o.Regions.ChangedCells), ("new_tracks", o.Regions.Regions.Count(r => r.NewTrack)),
             ("entities", o.EntityLayer?.Candidates.Count), ("relations", o.EntityLayer?.Relations.Count), ("events", o.Prediction == null ? null : string.Join(",", o.Prediction.Occurred.Select(i => GameKouryakuKun.Core.Observation.LocalEventModel.Events[i]))));
+        // v0.33.5 S2: Observation Bundle 派生（既定 OFF。探索・学習・GT は不変）
+        TryAttachObservationBundle(o, step);
+    }
+
+    /// <summary>
+    /// S2 Sensor Stack: StructuredObservation から Bundle を派生し診断ログへ要約。
+    /// <see cref="RuntimeFlags.AttachObservationBundle"/> 既定 OFF（GKK_ATTACH_OBSERVATION_BUNDLE=1 で ON）。
+    /// </summary>
+    private void TryAttachObservationBundle(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
+    {
+        RuntimeFlags.ApplyBundleEffective();
+        if (!RuntimeFlags.AttachObservationBundle) { LatestObservationBundle = null; return; }
+        try
+        {
+            var bundle = GameKouryakuKun.Core.Observation.SensorStackAssembler.FromStructured(o);
+            LatestObservationBundle = bundle;
+            _env.Log.Write("observation_bundle",
+                ("step", step),
+                ("schema", bundle.SchemaVersion),
+                ("assembler", GameKouryakuKun.Core.Observation.SensorStackAssembler.AssemblerId),
+                ("gt_decision", bundle.CoordinateFrame?.Decision),
+                ("gt_accepted", bundle.CoordinateFrame?.Accepted),
+                ("candidates", bundle.Candidates.Count),
+                ("tracks", bundle.Tracks.Count),
+                ("relations", bundle.Relations.Count),
+                ("layer_cf", bundle.Layers.CoordinateFrame),
+                ("layer_cf_ent", bundle.Layers.Candidates),
+                ("changed_cells", bundle.ChangeField?.ChangedCells));
+        }
+        catch (Exception e)
+        {
+            LatestObservationBundle = null;
+            _env.Log.Write("observation_bundle_failed", ("step", step), ("error", e.Message));
+        }
     }
     public SelfGoals? Goals { get; private set; }
     private int _goalEventsLogged;

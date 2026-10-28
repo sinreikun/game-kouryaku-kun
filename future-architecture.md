@@ -2,7 +2,7 @@
 
 - 文書: `future-architecture.md`
 - 作成: 2026-10-28（利用者指示 t112u）
-- 更新: 2026-10-28（t113u: 旧 memory.sqlite は read-only 史料として保持確定）
+- 更新: 2026-10-28（t115u: S2 Sensor Stack 契約+Assembler 開始 / #158 GT 縦ロック）
 - 位置づけ: **現行コードを守る設計ではない**。最終目標と絶対原則だけを守り、現実装は KEEP / REBUILD / REMOVE / MISSING で評価する。
 - 本文書が承認されるまで、大規模な実装変更には着手しない。
 
@@ -738,8 +738,9 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 1. ~~本文書のレビュー指摘を反映~~ → t113u を §26・付録 B に反映済み
 2. ~~S1 契約~~ → **`docs/s1-runtime-contract.md`**（Experience レコード・ModelBundle・Kernel ステップ API・Adapter / LossReport・ファイル配置）
 3. ~~旧 DB アダプタ垂直スライス~~ → `OldExperienceAdapter` + `experience-vnext.sqlite`（学習ロジック変更なし・旧 DB read-only・Session 未配線）
-4. ~~実機 Adapter Replay~~ / ~~Kernel 空シェル~~ / ~~dual-append~~ → `RuntimeKernel` + Session `VNextDualAppend`（`src/audit/v0.33.3.md`、既定 OFF・`GKK_USE_EXPERIENCE_VNEXT=1` で試験）。v0.33.4 で UI トグル（既定 OFF・env 優先）追加。**次:** 実機で UI ON の数手併記を確認 → Kernel API 固定のうえ S2 Sensor Stack
-5. その後 S2 で Sensor Stack に GT/Track/EntityExperience を移植
+4. ~~実機 Adapter Replay~~ / ~~Kernel 空シェル~~ / ~~dual-append~~ → `RuntimeKernel` + Session `VNextDualAppend`（`src/audit/v0.33.3.md`、既定 OFF・`GKK_USE_EXPERIENCE_VNEXT=1` で試験）。v0.33.4 で UI トグル（既定 OFF・env 優先）追加。
+5. ~~実機 #158（v0.33.4）で GT 縦（y+/y− field）ロック寄り~~ → FAIL 0・dual-append ON 一致。P-7 には戻らない。
+6. ~~S2 契約 + Assembler 縦スライス開始~~ → `docs/s2-sensor-stack-contract.md` + `SensorStackAssembler`（`src/audit/v0.33.5.md`）。GT/Track アルゴリズム KEEP。Observation Bundle を派生面として追加（既定 OFF・`GKK_ATTACH_OBSERVATION_BUNDLE=1`）。**次:** EntityExperience 付帯（KEEP）／Kernel が Bundle を正規入力化／その後 S3。
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。
 
