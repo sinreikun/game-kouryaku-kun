@@ -237,4 +237,27 @@ public static class RuntimeFlags
             ? "Importance attach: ON（環境変数 GKK_ATTACH_IMPORTANCE=1）"
             : "Importance attach: OFF（既定）";
     }
+
+    // --- S5 Intrinsic & Active Experiment（docs/s5-intrinsic-active-exp-contract.md §4）---
+
+    /// <summary>環境変数名。=1 で Mixer 並行ログ + 条件付き能動実験ソフト割込み（既定 OFF）。</summary>
+    public const string IntrinsicMixerEnvName = "GKK_USE_INTRINSIC_MIXER";
+
+    public static bool UseIntrinsicMixer { get; set; }
+
+    public static bool IntrinsicMixerEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(IntrinsicMixerEnvName), "1", StringComparison.Ordinal);
+
+    public static void ApplyIntrinsicMixerEffective()
+    {
+        UseIntrinsicMixer = IntrinsicMixerEnvForcesOn;
+    }
+
+    public static string IntrinsicMixerStatusText()
+    {
+        ApplyIntrinsicMixerEffective();
+        return UseIntrinsicMixer
+            ? "Intrinsic Mixer: ON（環境変数 GKK_USE_INTRINSIC_MIXER=1・並行ログ+条件付き active_experiment）"
+            : "Intrinsic Mixer: OFF（既定・Explorer 同一）";
+    }
 }

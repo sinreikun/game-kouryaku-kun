@@ -214,10 +214,12 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine($"observation_bundle_attach effective={RuntimeFlags.AttachObservationBundle} env={RuntimeFlags.BundleEnvForcesOn}");
         RuntimeFlags.ApplyCausalWmEffective();
         RuntimeFlags.ApplyImportanceEffective();
+        RuntimeFlags.ApplyIntrinsicMixerEffective();
         summary.AppendLine(RuntimeFlags.CausalWmStatusText());
         summary.AppendLine($"causal_wm_attach effective={RuntimeFlags.AttachCausalWm} env={RuntimeFlags.CausalWmEnvForcesOn}");
         summary.AppendLine($"importance_attach effective={RuntimeFlags.AttachImportance} env={RuntimeFlags.ImportanceEnvForcesOn}");
         summary.AppendLine(GameKouryakuKun.Core.Importance.LiveRoiPolicy.StatusText(RuntimeFlags.AttachImportance));
+        summary.AppendLine(RuntimeFlags.IntrinsicMixerStatusText());
         try
         {
             var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);

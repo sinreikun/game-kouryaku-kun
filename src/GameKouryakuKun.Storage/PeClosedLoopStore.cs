@@ -20,7 +20,7 @@ public sealed class PeClosedLoopStore : IDisposable
 
     public static string DefaultPath(string profileDataDir) => System.IO.Path.Combine(profileDataDir, FileName);
 
-    public static PeClosedLoopStore Open(string profileDataDir, string appVersion = "0.34.1")
+    public static PeClosedLoopStore Open(string profileDataDir, string appVersion = "0.35.0")
     {
         var path = DefaultPath(profileDataDir);
         Directory.CreateDirectory(profileDataDir);

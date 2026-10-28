@@ -580,6 +580,9 @@ public static class HealthReport
         // S4 Importance / Attention（advisory。学習報酬に使わない）
         AddImportanceFromLogs(cur, Add);
 
+        // S5 Intrinsic / Active Exp（表示のみ。学習報酬に使わない）
+        AddIntrinsicFromLogs(cur, Add);
+
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();
         sb.AppendLine($"健全性レポート（ゲームに依らないシステム動作だけ。プレイ内容は評価しない）: 総合 {Mark(res.Overall)}");
@@ -726,6 +729,28 @@ public static class HealthReport
             int forced = live.Count(e => Str(e, "mode") == "forced_read");
             add("重要度", "ライブ ROI（OCR）", Level.Ok, $"live_roi {live.Count}・deferred {def}・forced_read {forced}（GT/Track 不変・欠測にしない）");
         }
+    }
+
+
+    /// <summary>S5: intrinsic_mix / active_experiment を件数表示（報酬に使わない）。</summary>
+    internal static void AddIntrinsicFromLogs(IReadOnlyList<JsonElement> cur, Action<string, string, Level, string> add)
+    {
+        static bool IsType(JsonElement e, string name) =>
+            e.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == name;
+        var mix = cur.Where(e => IsType(e, "intrinsic_mix")).ToList();
+        var exp = cur.Where(e => IsType(e, "active_experiment")).ToList();
+        if (mix.Count == 0 && exp.Count == 0)
+        {
+            add("内発価値", "Intrinsic/ActiveExp", Level.NotTested, "今回のログに intrinsic_mix / active_experiment なし（フラグ OFF か未実行）");
+            return;
+        }
+        string last = mix.Count > 0 ? Str(mix[^1], "summary") : "";
+        if (last == "") last = $"intrinsic_mix {mix.Count}";
+        add("内発価値", "ポートフォリオ Mixed", mix.Count > 0 ? Level.Info : Level.NotTested, last);
+        int prop = exp.Count(e => Str(e, "status") == "proposed");
+        int applied = exp.Count(e => Str(e, "applied") == "True" || Str(e, "applied") == "true");
+        add("内発価値", "能動実験", exp.Count > 0 ? Level.Info : Level.NotTested,
+            $"active_experiment {exp.Count}・proposed {prop}・applied {applied}（固定キーなし）");
     }
 
     private static IEnumerable<string> SafeLines(string path)
