@@ -749,8 +749,26 @@ public static class HealthReport
         add("内発価値", "ポートフォリオ Mixed", mix.Count > 0 ? Level.Info : Level.NotTested, last);
         int prop = exp.Count(e => Str(e, "status") == "proposed");
         int applied = exp.Count(e => Str(e, "applied") == "True" || Str(e, "applied") == "true");
+        int blocked = exp.Count(e => Str(e, "status") == "blocked" || Str(e, "status") == "budget_exhausted");
         add("内発価値", "能動実験", exp.Count > 0 ? Level.Info : Level.NotTested,
-            $"active_experiment {exp.Count}・proposed {prop}・applied {applied}（固定キーなし）");
+            $"active_experiment {exp.Count}・proposed {prop}・applied {applied}・blocked {blocked}（固定キーなし）");
+        // 寄与・割込み統計（表示のみ・報酬に使わない）
+        string? stats = null;
+        for (int i = mix.Count - 1; i >= 0; i--)
+        {
+            var s = Str(mix[i], "stats");
+            if (!string.IsNullOrEmpty(s)) { stats = s; break; }
+        }
+        if (stats == null)
+        {
+            for (int i = exp.Count - 1; i >= 0; i--)
+            {
+                var s = Str(exp[i], "stats");
+                if (!string.IsNullOrEmpty(s)) { stats = s; break; }
+            }
+        }
+        add("内発価値", "寄与・割込み", stats != null ? Level.Info : Level.NotTested,
+            stats ?? $"mix {mix.Count}・interrupt applied {applied}（stats 未記録）");
     }
 
     private static IEnumerable<string> SafeLines(string path)

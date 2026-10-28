@@ -408,8 +408,11 @@ public sealed class PlaySession
                 try { _env.Memory.EndRun(id, endReason, Json.Obj(("stop_reason", StopReason), ("steps", Step),
                     ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource))); } catch (Exception e) { Emit("探索の終了記録に失敗: " + e.Message, LogLevel.Warn); }
             try { FlushPeClosedLoop("session_end"); } catch { }
+            try { FlushIntrinsicStats("session_end"); } catch { }
             try { _peStore?.Dispose(); } catch { }
             _peStore = null;
+            try { _intrinsicStore?.Dispose(); } catch { }
+            _intrinsicStore = null;
             try { _vnextKernel?.Dispose(); } catch { }
             _vnextKernel = null;
             foreach (var b in _inputs) try { b.Dispose(); } catch { }
@@ -417,6 +420,7 @@ public sealed class PlaySession
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource),
                 ("causal_wm", RuntimeFlags.AttachCausalWm), ("importance", RuntimeFlags.AttachImportance), ("intrinsic_mixer", RuntimeFlags.UseIntrinsicMixer), ("active_exp_interrupts", ActiveExperimentInterrupts), ("pe_enqueued", PeLoop.Enqueued), ("pe_pending", PeLoop.PendingCount),
                 ("pe_summary", RuntimeFlags.AttachCausalWm ? PeLoop.SummaryLine() : null),
+                ("intrinsic_stats", RuntimeFlags.UseIntrinsicMixer ? IntrinsicStats.SummaryLine() : null),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
                 ("input_sent", Delivery.Sent), ("input_delivered", Delivery.Delivered), ("input_failed", Delivery.Failed), ("input_reaction_observed", Delivery.ReactionObserved),
                 ("input_reacted", Delivery.Reacted), ("longest_no_reaction", Delivery.LongestNoReactionStreak), ("agent_steps", AgentSteps), ("human_steps", HumanSteps),
@@ -888,8 +892,12 @@ public sealed class PlaySession
                 var gcand = GoalStepOrNull(goals, explorer, model, curNode, step, goalRng);
                 if (gcand != null && !explorer.IsUserAllowed(gcand.Action.Name)) { goals.Abandon("人が止めた入力（自律探索で使わない）", step); foreach (var ge in goals.Events.Skip(_goalEventsLogged).ToList()) LogGoal(ge, step); gcand = null; }
                 if (gcand is { } gc) { choice = gc; goalComposite = gc.Action.Group == ActionGroup.Sequence; }
-                else choice = explorer.Choose(curNode);
-                choice = TryApplyIntrinsicMixer(explorer, curNode, step, choice);
+                else
+                {
+                    choice = explorer.Choose(curNode);
+                    // S5: Goal 経路は割込み禁止（Human/Sequence はこの分岐に来ない）
+                    choice = TryApplyIntrinsicMixer(explorer, curNode, step, choice);
+                }
                 if (choice.Action.Group == ActionGroup.Sequence && choice.Action.Steps is { Count: > 0 } subs)
                 {
                     composite = choice.Action; compStart = curNode; compChanged = false; compDisc = explorer.Discoveries; compPred = model.Predict(curNode, composite.Name);
@@ -1491,6 +1499,12 @@ public sealed class PlaySession
     /// <summary>S5: Intrinsic Mixer レポート（フラグ ON 時）。</summary>
     public volatile GameKouryakuKun.Core.Intrinsic.IntrinsicMixerReport? LatestIntrinsic;
     public int ActiveExperimentInterrupts;
+    /// <summary>S5: 寄与・割込み統計（フラグ ON 時。S7 メタ重み材料・本スライスは学習しない）。</summary>
+    public readonly GameKouryakuKun.Core.Intrinsic.IntrinsicContributionStats IntrinsicStats = new();
+    private readonly List<long> _activeExpInterruptSteps = new();
+    private long? _lastActiveExpStep;
+    private string? _lastActiveExpAction;
+    private IntrinsicStatsStore? _intrinsicStore;
     /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
     public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
     private PeClosedLoopStore? _peStore;
@@ -1999,6 +2013,9 @@ public sealed class PlaySession
                 ("h1", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H1Immediate)?.Status),
                 ("h2", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H2Delayed)?.Status),
                 ("h3", rec.Hypotheses.FirstOrDefault(h => h.Id == GameKouryakuKun.Core.Causality.CausalHypothesisIds.H3Context)?.Status));
+            // S5: 割込み後の PE/因果 ambiguity 落ちを観察（報酬に使わない）
+            if (IntrinsicStats.InterruptsApplied > 0)
+                IntrinsicStats.ObserveAftermath(step, rec.Preferred, rec.PeRoutingTags);
         }
         catch (Exception e)
         {
@@ -2016,25 +2033,40 @@ public sealed class PlaySession
     
     /// <summary>
     /// S5: Intrinsic Mixer 並行ログ + 条件付き能動実験ソフト割込み。
-    /// Human / Goal / Sequence では呼ばない想定。フラグ OFF なら choice をそのまま返す。
+    /// Human / Goal / Sequence mid-run では呼ばない／拒否。フラグ OFF なら choice をそのまま返す。
+    /// 予算は割込みスパム・同一失敗ループ用（馬鹿プレイ禁止ではない）。
     /// </summary>
     private ExploreChoice TryApplyIntrinsicMixer(Explorer explorer, string node, long step, ExploreChoice choice)
     {
         RuntimeFlags.ApplyIntrinsicMixerEffective();
         if (!RuntimeFlags.UseIntrinsicMixer) { LatestIntrinsic = null; return choice; }
+        // 明示ガード（呼び出し側でも Goal を除外するが二重化）
+        if (choice.Rule is "human" or "goal" or "sequence_step" or "sequence")
+        {
+            IntrinsicStats.NoteBlocked("guard:" + choice.Rule);
+            LatestIntrinsic = null;
+            return choice;
+        }
         try
         {
             var sc = choice.Candidates is { Count: > 0 } ? choice.Candidates : explorer.ScoreCandidates(node);
+            string? block = GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.BlockReason(
+                ActiveExperimentInterrupts,
+                GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.DefaultMaxInterrupts,
+                step, _lastActiveExpStep, _activeExpInterruptSteps, _lastActiveExpAction, null);
             var report = GameKouryakuKun.Core.Intrinsic.IntrinsicValueMixer.Mix(
                 new GameKouryakuKun.Core.Intrinsic.IntrinsicMixInput(
                     sc, step, LatestCausalComparison, LatestShortHorizon,
                     LatestCausalComparison?.PeRoutingTags,
                     ActiveExperimentInterrupts,
-                    GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.DefaultMaxInterrupts));
+                    GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.DefaultMaxInterrupts,
+                    SoftInterruptBlock: block));
             LatestIntrinsic = report;
+            IntrinsicStats.NoteMixStep();
             _env.Log.Write("intrinsic_mix",
                 ("step", step), ("summary", report.SummaryLine()), ("mode", report.Mode),
                 ("top", report.TopMixedAction),
+                ("stats", IntrinsicStats.SummaryLine()),
                 ("scores", report.Scores.Select(x => new Dictionary<string, object?>
                 {
                     ["action"] = x.Action, ["mixed"] = x.Mixed, ["components"] = x.Components,
@@ -2042,32 +2074,72 @@ public sealed class PlaySession
 
             var exp = report.Experiment;
             bool applied = false;
-            if (exp is { Status: "proposed" } && choice.Rule is "scored" or "fallback" or "momentum"
+            string? blockApplied = block;
+            if (exp is { Status: "proposed" } && choice.Rule is "scored" or "fallback" or "momentum" or "chord_probe"
                 && !string.Equals(exp.Action, choice.Action.Name, StringComparison.Ordinal))
             {
-                var act = explorer.Actions.FirstOrDefault(a => a.Name == exp.Action && explorer.IsUserAllowed(a.Name));
-                if (act != null)
+                // 提案 Action に対する同一失敗ループ冷却を再評価
+                blockApplied = GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.BlockReason(
+                    ActiveExperimentInterrupts,
+                    GameKouryakuKun.Core.Intrinsic.ActiveExperimentBudget.DefaultMaxInterrupts,
+                    step, _lastActiveExpStep, _activeExpInterruptSteps, _lastActiveExpAction, exp.Action);
+                if (blockApplied != null)
                 {
-                    var cand = sc.FirstOrDefault(c => c.Action == act.Name);
-                    choice = new ExploreChoice(act,
-                        $"能動実験（仮説識別）: {exp.Note} gain={exp.ExpectedInfoGain:0.00} — 元: {choice.Reason}",
-                        cand?.Score ?? choice.Score)
+                    IntrinsicStats.NoteBlocked(blockApplied);
+                    exp = new GameKouryakuKun.Core.Intrinsic.ActiveExperimentProposal
                     {
-                        Rule = "active_experiment",
-                        Probability = cand?.Probability ?? choice.Probability,
-                        Candidates = sc,
-                        Information = cand?.Information ?? choice.Information,
-                        Priors = choice.Priors,
+                        Action = exp.Action,
+                        Status = "blocked",
+                        ExpectedInfoGain = exp.ExpectedInfoGain,
+                        CompeteHypotheses = exp.CompeteHypotheses,
+                        Note = $"soft_interrupt_block={blockApplied}; was={exp.Note}",
                     };
-                    ActiveExperimentInterrupts++;
-                    applied = true;
+                }
+                else
+                {
+                    var act = explorer.Actions.FirstOrDefault(a => a.Name == exp.Action && explorer.IsUserAllowed(a.Name));
+                    if (act != null)
+                    {
+                        var cand = sc.FirstOrDefault(c => c.Action == act.Name);
+                        choice = new ExploreChoice(act,
+                            $"能動実験（仮説識別）: {exp.Note} gain={exp.ExpectedInfoGain:0.00} — 元: {choice.Reason}",
+                            cand?.Score ?? choice.Score)
+                        {
+                            Rule = "active_experiment",
+                            Probability = cand?.Probability ?? choice.Probability,
+                            Candidates = sc,
+                            Information = cand?.Information ?? choice.Information,
+                            Priors = choice.Priors,
+                        };
+                        ActiveExperimentInterrupts++;
+                        _lastActiveExpStep = step;
+                        _lastActiveExpAction = act.Name;
+                        _activeExpInterruptSteps.Add(step);
+                        IntrinsicStats.NoteInterruptApplied(step, act.Name,
+                            LatestCausalComparison?.Preferred, LatestCausalComparison?.PeRoutingTags);
+                        applied = true;
+                    }
                 }
             }
+            else if (exp is { Status: "blocked" or "budget_exhausted" })
+            {
+                string reason = exp.Status == "budget_exhausted" ? "budget" : (block ?? "guard");
+                IntrinsicStats.NoteBlocked(reason);
+            }
+
+            // 最終選択の成分寄与
+            var chosenScore = report.Scores.FirstOrDefault(s => s.Action == choice.Action.Name);
+            IntrinsicStats.NoteChosen(chosenScore);
+
             if (exp != null)
                 _env.Log.Write("active_experiment",
                     ("step", step), ("status", exp.Status), ("action", exp.Action),
                     ("gain", exp.ExpectedInfoGain), ("compete", exp.CompeteHypotheses),
-                    ("applied", applied), ("interrupts", ActiveExperimentInterrupts), ("note", exp.Note));
+                    ("applied", applied), ("interrupts", ActiveExperimentInterrupts),
+                    ("block", blockApplied), ("note", exp.Note),
+                    ("stats", IntrinsicStats.SummaryLine()));
+
+            if (step % 25 == 0) try { FlushIntrinsicStats("periodic"); } catch { }
             return choice;
         }
         catch (Exception e)
@@ -2077,6 +2149,24 @@ public sealed class PlaySession
             return choice;
         }
     }
+
+    private void FlushIntrinsicStats(string reason)
+    {
+        if (!RuntimeFlags.UseIntrinsicMixer) return;
+        if (IntrinsicStats.MixSteps == 0 && IntrinsicStats.InterruptsApplied == 0) return;
+        try
+        {
+            _intrinsicStore ??= IntrinsicStatsStore.Open(_env.ProfileDataDir, AppEnv.Version);
+            _intrinsicStore.Persist(IntrinsicStats);
+            _env.Log.Write("intrinsic_stats_flush", ("reason", reason), ("summary", IntrinsicStats.SummaryLine()),
+                ("store", _intrinsicStore.StatsSummary()));
+        }
+        catch (Exception e)
+        {
+            _env.Log.Write("intrinsic_stats_flush_failed", ("reason", reason), ("error", e.Message));
+        }
+    }
+
 
 private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
     {

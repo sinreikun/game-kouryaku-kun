@@ -2,7 +2,7 @@
 
 - 文書: `future-architecture.md`
 - 作成: 2026-10-28（利用者指示 t112u）
-- 更新: 2026-10-28（t115u: S5 Intrinsic & Active Exp 開始）
+- 更新: 2026-10-28（t115u: S5 クローズ → 次 S6）
 - 位置づけ: **現行コードを守る設計ではない**。最終目標と絶対原則だけを守り、現実装は KEEP / REBUILD / REMOVE / MISSING で評価する。
 - 本文書が承認されるまで、大規模な実装変更には着手しない。
 
@@ -747,7 +747,8 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 10. ~~Predictive WM 短時間 + H3~~ → `PredictiveWmShortHorizon` WRAP（LocalEvent/ContextHelps）+ H3 scored/partial（`src/audit/v0.33.9.md`）。
 11. ~~S4 Importance & Attention 契約 + 薄いシェル~~ → `docs/s4-importance-attention-contract.md` + Estimator / advisory（`src/audit/v0.34.0.md`）。
 12. ~~S4 可逆ライブ OCR ROI → Stage クローズ~~ → `LiveRoiPolicy` + TextReader `deferred` / rare recheck（`src/audit/v0.34.1.md`）。
-13. ~~S5 Intrinsic & Active Exp 契約 + 薄いシェル~~ → `docs/s5-intrinsic-active-exp-contract.md` + `IntrinsicValueMixer` / `ActiveExperimentPlanner`（`src/audit/v0.35.0.md`、`GKK_USE_INTRINSIC_MIXER` 既定 OFF・並行ログ+条件付き soft interrupt）。Explorer 式は未破壊。**次:** 寄与統計強化 → **S6**（P-7 には戻らない）。
+13. ~~S5 Intrinsic & Active Exp 契約 + 薄いシェル~~ → `docs/s5-intrinsic-active-exp-contract.md` + `IntrinsicValueMixer` / `ActiveExperimentPlanner`（`src/audit/v0.35.0.md`）。
+14. ~~S5 寄与統計 + 割込み予算 → Stage クローズ~~ → `IntrinsicContributionStats` / `intrinsic-stats.sqlite` / `ActiveExperimentBudget`（session/window/cooldown）+ Human/Goal/Sequence ガード強化（`src/audit/v0.35.1.md`、契約 0.2）。**S5 クローズ可。次 = S6**（Goal/Plan/Skill）。P-7 には戻らない。
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。
 

@@ -192,6 +192,10 @@ public sealed class AppEnv : IDisposable
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
             if (File.Exists(vpath)) files.Add(("experience-vnext.sqlite", vpath));
+            var ipath = IntrinsicStatsStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(ipath)) files.Add(("intrinsic-stats.sqlite", ipath));
+            var pepath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(pepath)) files.Add(("pe-closed-loop.sqlite", pepath));
         }
         catch { }
         // 画面の画像は入れない（2026-10-18: 実機確認は診断 zip だけで行い、画像は開かない）。名前と大きさとハッシュだけを一覧にする
@@ -231,6 +235,17 @@ public sealed class AppEnv : IDisposable
             else summary.AppendLine("pe-closed-loop.sqlite: なし（Causal WM フラグ OFF か未 enqueue）");
         }
         catch (Exception e) { summary.AppendLine("pe-closed-loop.sqlite: 確認失敗 " + e.Message); }
+        try
+        {
+            var ip = IntrinsicStatsStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(ip))
+            {
+                using var ist = IntrinsicStatsStore.Open(ProfileDataDir, Version);
+                summary.AppendLine(ist.StatsSummary());
+            }
+            else summary.AppendLine("intrinsic-stats.sqlite: なし（Intrinsic Mixer フラグ OFF か未 mix）");
+        }
+        catch (Exception e) { summary.AppendLine("intrinsic-stats.sqlite: 確認失敗 " + e.Message); }
         try
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);

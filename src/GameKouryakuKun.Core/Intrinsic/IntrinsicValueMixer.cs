@@ -39,7 +39,7 @@ public sealed class IntrinsicActionScore
 public sealed class ActiveExperimentProposal
 {
     public string Action { get; init; } = "";
-    public string Status { get; init; } = "not_applicable"; // proposed | budget_exhausted | not_applicable
+    public string Status { get; init; } = "not_applicable"; // proposed | budget_exhausted | blocked | not_applicable
     public double ExpectedInfoGain { get; init; }
     public string? CompeteHypotheses { get; init; }
     public string? Note { get; init; }
@@ -70,14 +70,8 @@ public sealed record IntrinsicMixInput(
     ShortHorizonForecast? ShortHorizon = null,
     IReadOnlyList<string>? PeTags = null,
     int ExperimentInterruptsUsed = 0,
-    int ExperimentBudget = ActiveExperimentBudget.DefaultMaxInterrupts);
-
-/// <summary>能動実験の手数予算（スタブ。枯渇後は提案のみ）。</summary>
-public static class ActiveExperimentBudget
-{
-    /// <summary>根拠: 診断セッション規模のソフト割込み上限（無限実験ループ防止。§12.3）。</summary>
-    public const int DefaultMaxInterrupts = 40;
-}
+    int ExperimentBudget = ActiveExperimentBudget.DefaultMaxInterrupts,
+    string? SoftInterruptBlock = null);
 
 /// <summary>
 /// S5 IntrinsicValueMixer: 既存 CandidateScore を WRAP してポートフォリオ Mixed を付ける。
@@ -145,6 +139,14 @@ public static class ActiveExperimentPlanner
 
     public static ActiveExperimentProposal Propose(IntrinsicMixInput input, IReadOnlyList<IntrinsicActionScore> mixed)
     {
+        if (!string.IsNullOrEmpty(input.SoftInterruptBlock))
+        {
+            return new ActiveExperimentProposal
+            {
+                Status = "blocked",
+                Note = $"soft_interrupt_block={input.SoftInterruptBlock}",
+            };
+        }
         if (input.ExperimentInterruptsUsed >= input.ExperimentBudget)
         {
             return new ActiveExperimentProposal

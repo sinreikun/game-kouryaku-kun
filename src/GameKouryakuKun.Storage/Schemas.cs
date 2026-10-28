@@ -935,4 +935,31 @@ CREATE TABLE causal_preferred_stats(
 INSERT OR REPLACE INTO pe_schema_meta(key, value) VALUES('contract', 's3-causal-wm-contract-pe-loop');
 """),
     };
+
+    // ============================================================
+    // intrinsic-stats.sqlite（S5: 寄与統計。memory.sqlite 非変更）
+    // ============================================================
+    public const string IntrinsicStatsMetaTable = "intrinsic_schema_meta";
+    public static readonly IReadOnlyList<Migration> IntrinsicStats = new[]
+    {
+        new Migration(1, "S5 intrinsic contribution + interrupt stats（docs/s5-intrinsic-active-exp-contract.md）", """
+CREATE TABLE intrinsic_schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE intrinsic_component_stats(
+  component TEXT PRIMARY KEY,
+  chosen_count INTEGER NOT NULL,
+  sum_when_chosen REAL NOT NULL
+);
+CREATE TABLE intrinsic_interrupt_stats(
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+CREATE TABLE intrinsic_tag_contrast(
+  phase TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY(phase, tag)
+);
+INSERT OR REPLACE INTO intrinsic_schema_meta(key, value) VALUES('contract', 's5-intrinsic-active-exp-stats');
+"""),
+    };
 }
