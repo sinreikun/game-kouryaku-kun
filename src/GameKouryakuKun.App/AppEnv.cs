@@ -217,6 +217,17 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine($"causal_wm_attach effective={RuntimeFlags.AttachCausalWm} env={RuntimeFlags.CausalWmEnvForcesOn}");
         try
         {
+            var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(pePath))
+            {
+                using var pe = PeClosedLoopStore.Open(ProfileDataDir, Version);
+                summary.AppendLine(pe.StatsSummary());
+            }
+            else summary.AppendLine("pe-closed-loop.sqlite: なし（Causal WM フラグ OFF か未 enqueue）");
+        }
+        catch (Exception e) { summary.AppendLine("pe-closed-loop.sqlite: 確認失敗 " + e.Message); }
+        try
+        {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
             if (File.Exists(vpath))
             {

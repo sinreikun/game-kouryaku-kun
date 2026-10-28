@@ -574,6 +574,9 @@ public static class HealthReport
         foreach (var e in events.Where(e => T(e) == "capture_probe").Take(2))
             Add("取得", Str(e, "backend"), Bool(e, "usable") ? Level.Ok : Level.Warn, $"fps {Num(e, "fps")}・{Num(e, "w")}x{Num(e, "h")}");
 
+        // S3 PE 閉ループ（ログ集計。学習報酬に使わない）
+        AddPeClosedLoopFromLogs(cur, Add);
+
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();
         sb.AppendLine($"健全性レポート（ゲームに依らないシステム動作だけ。プレイ内容は評価しない）: 総合 {Mark(res.Overall)}");
@@ -658,6 +661,36 @@ public static class HealthReport
     private static bool Bool(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.True;
     private static double Num(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? Math.Round(v.GetDouble(), 2) : 0;
     private static T Try<T>(Func<T> f, T fallback = default!) { try { return f(); } catch { return fallback; } }
+
+
+    /// <summary>S3: causal_wm / pe_feature_candidate / pe_closed_loop_summary を件数だけ表示（意味ラベルなし）。</summary>
+    internal static void AddPeClosedLoopFromLogs(IReadOnlyList<JsonElement> cur, Action<string, string, Level, string> add)
+    {
+        static bool IsType(JsonElement e, string name) =>
+            e.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == name;
+        var wm = cur.Where(e => IsType(e, "causal_wm")).ToList();
+        var summaries = cur.Where(e => IsType(e, "pe_closed_loop_summary")).ToList();
+        var cands = cur.Where(e => IsType(e, "pe_feature_candidate")).ToList();
+        if (wm.Count == 0 && summaries.Count == 0 && cands.Count == 0)
+        {
+            add("因果WM", "PE閉ループ", Level.NotTested, "今回のログに causal_wm / pe_closed_loop_summary なし（フラグ OFF か未実行）");
+            return;
+        }
+        var pref = new Dictionary<string, int>(StringComparer.Ordinal);
+        var tags = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var e in wm)
+        {
+            string p = Str(e, "preferred"); if (p != "") pref[p] = pref.GetValueOrDefault(p) + 1;
+            foreach (var tag in Str(e, "tags").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                if (tag.Length > 0) tags[tag] = tags.GetValueOrDefault(tag) + 1;
+        }
+        string prefS = pref.Count == 0 ? "なし" : string.Join("・", pref.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value}"));
+        string tagS = tags.Count == 0 ? "なし" : string.Join("・", tags.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value}"));
+        add("因果WM", "H0–H4 採用（件数）", Level.Info, $"比較 {wm.Count}・{prefS}");
+        add("因果WM", "PE ルーティングタグ（件数）", Level.Info, tagS);
+        add("因果WM", "特徴候補 enqueue", cands.Count > 0 ? Level.Ok : summaries.Count > 0 ? Level.Info : Level.NotTested,
+            $"pe_feature_candidate {cands.Count}・summary {summaries.Count}" + (summaries.Count > 0 ? "／" + Str(summaries[^1], "summary") : ""));
+    }
 
     private static IEnumerable<string> SafeLines(string path)
     {

@@ -407,11 +407,16 @@ public sealed class PlaySession
             if (RunId is long id)
                 try { _env.Memory.EndRun(id, endReason, Json.Obj(("stop_reason", StopReason), ("steps", Step),
                     ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource))); } catch (Exception e) { Emit("探索の終了記録に失敗: " + e.Message, LogLevel.Warn); }
+            try { FlushPeClosedLoop("session_end"); } catch { }
+            try { _peStore?.Dispose(); } catch { }
+            _peStore = null;
             try { _vnextKernel?.Dispose(); } catch { }
             _vnextKernel = null;
             foreach (var b in _inputs) try { b.Dispose(); } catch { }
             _env.Log.Write("session_end", ("reason", endReason), ("stop_reason", StopReason), ("steps", Step), ("duration_s", Math.Round(_runClock.Elapsed.TotalSeconds, 1)),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource),
+                ("causal_wm", RuntimeFlags.AttachCausalWm), ("pe_enqueued", PeLoop.Enqueued), ("pe_pending", PeLoop.PendingCount),
+                ("pe_summary", RuntimeFlags.AttachCausalWm ? PeLoop.SummaryLine() : null),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
                 ("input_sent", Delivery.Sent), ("input_delivered", Delivery.Delivered), ("input_failed", Delivery.Failed), ("input_reaction_observed", Delivery.ReactionObserved),
                 ("input_reacted", Delivery.Reacted), ("longest_no_reaction", Delivery.LongestNoReactionStreak), ("agent_steps", AgentSteps), ("human_steps", HumanSteps),
@@ -559,6 +564,7 @@ public sealed class PlaySession
         RuntimeFlags.ApplyCausalWmEffective();
         Emit(RuntimeFlags.CausalWmStatusText() + "（S3・探索挙動は変えません）",
             RuntimeFlags.AttachCausalWm ? LogLevel.Ok : LogLevel.Info);
+        if (RuntimeFlags.AttachCausalWm) Emit(PeLoop.SummaryLine(), LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled)));
@@ -1469,6 +1475,9 @@ public sealed class PlaySession
     public volatile GameKouryakuKun.Core.Observation.ObservationBundle? LatestObservationBundle;
     /// <summary>S3: フラグ ON 時の H0–H4 比較（探索・学習は参照しない）。</summary>
     public volatile GameKouryakuKun.Core.Causality.CausalComparisonRecord? LatestCausalComparison;
+    /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
+    public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
+    private PeClosedLoopStore? _peStore;
     /// <summary>v0.30.3: LatestObservation を作った画面（重ね表示をこの画面の上に描く）</summary>
     public volatile Tuple<GameKouryakuKun.Core.Observation.StructuredObservation, GameKouryakuKun.Core.Imaging.Frame>? LatestViewBox;
     public (GameKouryakuKun.Core.Observation.StructuredObservation Obs, GameKouryakuKun.Core.Imaging.Frame Frame)? LatestView
@@ -1773,7 +1782,7 @@ public sealed class PlaySession
             ("entities", o.EntityLayer?.Candidates.Count), ("relations", o.EntityLayer?.Relations.Count), ("events", o.Prediction == null ? null : string.Join(",", o.Prediction.Occurred.Select(i => GameKouryakuKun.Core.Observation.LocalEventModel.Events[i]))));
         // v0.33.5 S2: Observation Bundle 派生（既定 OFF。探索・学習・GT は不変）
         TryAttachObservationBundle(o, step);
-        // v0.33.7 S3: Causal WM 比較（既定 OFF）
+        // v0.33.8 S3: Causal WM + PE 閉ループ（既定 OFF）
         TryAttachCausalWm(o, step);
     }
 
@@ -1832,6 +1841,31 @@ public sealed class PlaySession
         }
     }
 
+
+    private void FlushPeClosedLoop(string reason)
+    {
+        RuntimeFlags.ApplyCausalWmEffective();
+        if (!RuntimeFlags.AttachCausalWm) return;
+        try
+        {
+            _env.Log.Write("pe_closed_loop_summary",
+                ("reason", reason),
+                ("summary", PeLoop.SummaryLine()),
+                ("pending", PeLoop.PendingCount),
+                ("enqueued", PeLoop.Enqueued),
+                ("dropped", PeLoop.Dropped),
+                ("tags", string.Join(",", PeLoop.TagCounts().Select(kv => kv.Key + ":" + kv.Value))),
+                ("preferred", string.Join(",", PeLoop.PreferredCounts().Select(kv => kv.Key + ":" + kv.Value))));
+            if (_peStore != null) _peStore.PersistSnapshot(PeLoop);
+            else if (PeLoop.Enqueued > 0)
+            {
+                _peStore = PeClosedLoopStore.Open(_env.ProfileDataDir, AppEnv.Version);
+                _peStore.PersistSnapshot(PeLoop);
+            }
+        }
+        catch (Exception e) { _env.Log.Write("pe_closed_loop_summary_failed", ("error", e.Message)); }
+    }
+
     /// <summary>
     /// S3 Causal WM: H0–H4 比較を既存 NaturalBaseline / RegionCausality / delayed から派生。
     /// <see cref="RuntimeFlags.AttachCausalWm"/> 既定 OFF（GKK_ATTACH_CAUSAL_WM=1）。
@@ -1871,6 +1905,17 @@ public sealed class PlaySession
                 ResidualCellCount: o.EntityLayer?.ResidualCells?.Count);
             var rec = GameKouryakuKun.Core.Causality.CausalHypothesisComparer.Compare(input);
             LatestCausalComparison = rec;
+            // PE closed-loop: record→queue (WM accept remains stub)
+            var cands = PeLoop.Observe(rec, RunId);
+            try
+            {
+                _peStore ??= PeClosedLoopStore.Open(_env.ProfileDataDir, AppEnv.Version);
+                _peStore.PersistSnapshot(PeLoop);
+            }
+            catch (Exception pe) { _env.Log.Write("pe_closed_loop_persist_failed", ("error", pe.Message)); }
+            foreach (var c in cands)
+                _env.Log.Write("pe_feature_candidate",
+                    ("candidate_id", c.CandidateId), ("tag", c.Tag), ("status", c.Status), ("step", c.Step), ("preferred", c.PreferredHypothesis));
             // Refresh Bundle with causal if attach-bundle also on
             if (LatestObservationBundle != null && RuntimeFlags.AttachObservationBundle)
             {

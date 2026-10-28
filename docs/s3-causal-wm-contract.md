@@ -2,7 +2,7 @@
 
 - 文書: `docs/s3-causal-wm-contract.md`
 - 拘束上位: `future-architecture.md` §8 Temporal/Causality・§9 World Model・§10 Prediction Error・§30 S3
-- 版: S3-contract-0.1（2026-10-28 / v0.33.7）
+- 版: S3-contract-0.2（2026-10-28 / v0.33.8）
 - 対象 Stage: **S3**（因果仮説比較の契約面 + 薄いシェル。深層 WM・能動実験は後続）
 
 本契約は実装可能な短い仕様である。GT / Track / Explorer / Goal / P-7 / しきい値 / 学習アルゴリズムは **変更しない**。
@@ -110,6 +110,25 @@
 
 ---
 
+
+---
+
+## 4.1 PE 閉ループ（record→queue、v0.33.8）
+
+「試算だけで終わらせない」最小実装: タグを **特徴候補キュー** に載せ、Health / 診断で件数を見せる。
+
+| 要素 | 規則 |
+|---|---|
+| トリガ | `GKK_ATTACH_CAUSAL_WM=1` かつ `CausalComparisonRecord` 生成時 |
+| カウンタ | タグ別・preferred(H0–H4/undecided) 別の累計 |
+| 候補 | タグ 1 件につき `PeFeatureCandidate` 1 行（id, tag, evidence_json, created_at, status=pending\|accepted\|rejected, step） |
+| 永続 | `{profileDataDir}/pe-closed-loop.sqlite`（**memory.sqlite 非変更**） |
+| Accept/Reject | status 更新のみ。**WM 条件付けへの自動採用はしない**（§11 / S4） |
+| Health | ログ `causal_wm` / `pe_feature_candidate` / `pe_closed_loop_summary` から件数 Info |
+| 禁止 | ゲーム意味ラベル・「中央最大＝キャラ」をキュー/API に入れない。学習報酬にタグを使わない |
+
+`reduces_with_history` / `reduces_nowhere` は稀でもキュー仕様は同じ（0 件でも Health は NotTested/Info）。
+
 ## 5. 非目標
 
 - P-7・しきい値緩和・GT/Track/EE アルゴリズム変更
@@ -121,19 +140,18 @@
 
 ---
 
-## 6. 合格条件（本スライス）
+## 6. 合格条件（v0.33.8 スライス）
 
-1. 本契約書がある
-2. `CausalComparisonRecord` / `CausalHypothesisComparer` がある
-3. 合成 fixture で H0/H1/H2 の少なくとも一部が既存源から `scored` になり、H3/H4 は明示 status
-4. PE タグが形式コードのみ（意味ラベルなし）
-5. フラグ既定 OFF で探索不変
-6. 全テスト緑・`src/audit/v0.33.7.md`・§30.1 更新
+1. PE タグが特徴候補キューに入り、status=pending で永続化できる
+2. Health / 診断 summary に H0–H4 preferred とタグ件数が見える
+3. Accept は status のみ（WM 自動拡大なし）
+4. フラグ既定 OFF で探索不変
+5. `src/audit/v0.33.8.md`・§30.1 更新・全テスト緑
 
 ---
 
 ## 7. 次の微小ステップ
 
-1. PE 閉ループ: タグ → Health / 文脈候補キュー（S4 手前の配線）
-2. Predictive WM 短時間層と H3 接続
-3. その後 S4 Importance（P-7 には戻らない）
+1. Predictive WM 短時間層と H3 接続
+2. 候補 Accept 時の文脈特徴試験（S4 Importance の入口）
+3. その後 S4（P-7 には戻らない）

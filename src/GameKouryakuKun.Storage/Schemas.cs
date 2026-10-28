@@ -902,4 +902,37 @@ CREATE INDEX ix_experiences_bundle ON experiences(model_bundle_id);
 INSERT OR REPLACE INTO vnext_schema_meta(key, value) VALUES('contract', 's2-sensor-stack-contract-0.2');
 """),
     };
+
+    // ============================================================
+    // pe-closed-loop.sqlite（S3: PE タグ→特徴候補キュー。memory.sqlite と分離）
+    // ============================================================
+    public const string PeClosedLoopMetaTable = "pe_schema_meta";
+    public static readonly IReadOnlyList<Migration> PeClosedLoop = new[]
+    {
+        new Migration(1, "S3 PE closed-loop candidates + routing stats（docs/s3-causal-wm-contract.md）", """
+CREATE TABLE pe_schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE pe_feature_candidates(
+  candidate_id INTEGER PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected')),
+  step INTEGER,
+  preferred_hypothesis TEXT,
+  run_id INTEGER,
+  detail TEXT
+);
+CREATE INDEX ix_pe_cand_tag ON pe_feature_candidates(tag);
+CREATE INDEX ix_pe_cand_status ON pe_feature_candidates(status);
+CREATE TABLE pe_routing_stats(
+  tag TEXT PRIMARY KEY,
+  count INTEGER NOT NULL
+);
+CREATE TABLE causal_preferred_stats(
+  hypothesis TEXT PRIMARY KEY,
+  count INTEGER NOT NULL
+);
+INSERT OR REPLACE INTO pe_schema_meta(key, value) VALUES('contract', 's3-causal-wm-contract-pe-loop');
+"""),
+    };
 }
