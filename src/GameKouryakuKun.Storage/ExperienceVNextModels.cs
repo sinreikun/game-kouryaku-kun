@@ -97,10 +97,11 @@ public sealed class LossReport
 public sealed record AdapterResult(IReadOnlyList<ExperienceRecord> Records, LossReport Loss, long? LossReportId);
 
 /// <summary>
-/// S1 切替フラグ。既定 OFF。PlaySession へのライブ配線はまだ無い（契約のみ）。
+/// S1 切替フラグ。既定 OFF。PlaySession は置換しない（Session 未配線）。
+/// ON のとき <see cref="RuntimeKernel.Step"/> が experience-vnext.sqlite へ追記する。
 /// </summary>
 public static class RuntimeFlags
 {
-    /// <summary>true でも S1 初期は Kernel 未接続のため no-op。将来のライブ追記の扉。</summary>
+    /// <summary>既定 false。true で RuntimeKernel 空シェルが vNext へ Experience を書く（学習・Sensor は動かない）。</summary>
     public static bool UseExperienceVNextWriter { get; set; }
 }

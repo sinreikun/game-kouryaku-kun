@@ -113,7 +113,7 @@
 
 ---
 
-## 5. Runtime Kernel ステップ API（契約のみ・本スライス未配線）
+## 5. Runtime Kernel ステップ API（空シェル実装済み・Session 未配線）
 
 擬似 API（実装は後続。PlaySession への既定接続は **OFF**）:
 
@@ -128,9 +128,11 @@ StepResult Step(ActionSpec action, StepContext ctx);
 | 原子性 | 途中失敗でも「半端な Experience」を成功扱いしない（欠測は Health） |
 | 1 手 1 観測 | 現行方針を維持 |
 | Dual-run | 同一入力で旧ループと新 Kernel を比較できる余地を残す。学習ロジックは変えない |
-| Feature flag | `RuntimeFlags.UseExperienceVNextWriter` **既定 false**。true でも S1 初期は Kernel 未接続 |
+| Feature flag | `RuntimeFlags.UseExperienceVNextWriter` **既定 false**。true で `RuntimeKernel.Step` が vNext 追記 |
 
-本スライスでは **フラグ定数と文書のみ**。Session / PlaySession へ書き込み経路を繋がない。
+実装: `GameKouryakuKun.Storage.RuntimeKernel`（空シェル）。sense/act/learn はせず、呼び出し側が渡した `ActionSpec` + `StepContext` を Experience に整形するだけ。
+Session / PlaySession へのライブ配線はまだしない（既定動作は今日と同一）。
+Bundle 既定: `runtime-kernel/shell@0`（provenance に `model_bundle_placeholder`）。
 
 ---
 
@@ -253,5 +255,5 @@ model_bundles(model_bundle_id, created_at, json)
 ## 11. 次の微小ステップ（示唆）
 
 1. Adapter を診断 Replay ツールから呼び、実機 `memory.sqlite` で LossReport 分布を見る（書込は vNext のみ）
-2. Runtime Kernel の空シェル（Step が旧 Session 1 手を委譲するだけ）をフラグ裏に置く
+2. ~~Runtime Kernel 空シェル~~ → `RuntimeKernel`（フラグ裏。Session 未配線）
 3. その後 S2 で Sensor Stack 契約へ GT / Track を移植
