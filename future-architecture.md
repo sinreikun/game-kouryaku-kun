@@ -2,7 +2,7 @@
 
 - 文書: `future-architecture.md`
 - 作成: 2026-10-28（利用者指示 t112u）
-- 更新: 2026-10-28（t115u: S6 クローズ → 次 S7）
+- 更新: 2026-10-28（t115u: S7 Outer 開始）
 - 位置づけ: **現行コードを守る設計ではない**。最終目標と絶対原則だけを守り、現実装は KEEP / REBUILD / REMOVE / MISSING で評価する。
 - 本文書が承認されるまで、大規模な実装変更には着手しない。
 
@@ -750,7 +750,8 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 13. ~~S5 Intrinsic & Active Exp 契約 + 薄いシェル~~ → `docs/s5-intrinsic-active-exp-contract.md` + `IntrinsicValueMixer` / `ActiveExperimentPlanner`（`src/audit/v0.35.0.md`）。
 14. ~~S5 寄与統計 + 割込み予算 → Stage クローズ~~ → `IntrinsicContributionStats` / `intrinsic-stats.sqlite` / `ActiveExperimentBudget`（`src/audit/v0.35.1.md`）。**S5 クローズ可。次 = S6**（着手済み）。
 15. ~~S6 Goal / Plan / Skill 契約 + 薄いシェル~~ → `docs/s6-goal-plan-skill-contract.md` + `ObservationGoal` / `SkillMiner` / `StructuredPlanner`（`src/audit/v0.36.0.md`）。
-16. ~~S6 Bundle 述語 + WM Plan + soft-adopt 予算 → Stage クローズ~~ → `ObservationPredicateEvidence` / ShortHorizon 効果チェック / `SoftAdoptBudget`（Human・recovery-gap）（`src/audit/v0.36.1.md`、契約 0.2）。**S6 クローズ可。次 = S7**。P-7 には戻らない。
+16. ~~S6 Bundle 述語 + WM Plan + soft-adopt 予算 → Stage クローズ~~ → `ObservationPredicateEvidence` / ShortHorizon / `SoftAdoptBudget`（`src/audit/v0.36.1.md`）。**S6 クローズ可。次 = S7**（着手済み）。
+17. ~~S7 Outer Self-Improvement 契約 + 薄いシェル~~ → `docs/s7-outer-self-improvement-contract.md` + `ModelRegistryStore` / `OuterLoopEvaluator`（`src/audit/v0.37.0.md`、`GKK_ENABLE_OUTER_LOOP` 既定 OFF・`GKK_OUTER_LOOP_PROMOTE` 第二フラグ）。code_edit 非対応。**次:** Replay メトリクス本配線 → S7 クローズ（P-7 / S8 には進まない）。
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。
 

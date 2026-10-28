@@ -194,6 +194,8 @@ public sealed class AppEnv : IDisposable
             if (File.Exists(vpath)) files.Add(("experience-vnext.sqlite", vpath));
             var ipath = IntrinsicStatsStore.DefaultPath(ProfileDataDir);
             if (File.Exists(ipath)) files.Add(("intrinsic-stats.sqlite", ipath));
+            var rpath = ModelRegistryStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(rpath)) files.Add(("model-registry.sqlite", rpath));
             var pepath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
             if (File.Exists(pepath)) files.Add(("pe-closed-loop.sqlite", pepath));
         }
@@ -226,6 +228,8 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine(RuntimeFlags.IntrinsicMixerStatusText());
         RuntimeFlags.ApplyStructuredGoalsEffective();
         summary.AppendLine(RuntimeFlags.StructuredGoalsStatusText());
+        RuntimeFlags.ApplyOuterLoopEffective();
+        summary.AppendLine(RuntimeFlags.OuterLoopStatusText());
         try
         {
             var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
@@ -248,6 +252,17 @@ public sealed class AppEnv : IDisposable
             else summary.AppendLine("intrinsic-stats.sqlite: なし（Intrinsic Mixer フラグ OFF か未 mix）");
         }
         catch (Exception e) { summary.AppendLine("intrinsic-stats.sqlite: 確認失敗 " + e.Message); }
+        try
+        {
+            var rp = ModelRegistryStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(rp))
+            {
+                using var reg = ModelRegistryStore.Open(ProfileDataDir, Version);
+                summary.AppendLine(reg.StatsSummary());
+            }
+            else summary.AppendLine("model-registry.sqlite: なし（Outer Loop フラグ OFF か未 open）");
+        }
+        catch (Exception e) { summary.AppendLine("model-registry.sqlite: 確認失敗 " + e.Message); }
         try
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);

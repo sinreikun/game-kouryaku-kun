@@ -586,6 +586,9 @@ public static class HealthReport
         // S6 Goal/Skill（表示のみ。達成数を良し悪しに使わない）
         AddStructuredGoalsFromLogs(cur, Add);
 
+        // S7 Outer / Registry（表示のみ）
+        AddOuterRegistryFromLogs(cur, Add);
+
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();
         sb.AppendLine($"健全性レポート（ゲームに依らないシステム動作だけ。プレイ内容は評価しない）: 総合 {Mark(res.Overall)}");
@@ -772,6 +775,34 @@ public static class HealthReport
         }
         add("内発価値", "寄与・割込み", stats != null ? Level.Info : Level.NotTested,
             stats ?? $"mix {mix.Count}・interrupt applied {applied}（stats 未記録）");
+    }
+
+    /// <summary>S7: outer_compare / outer_promote / registry 件数表示。</summary>
+    internal static void AddOuterRegistryFromLogs(IReadOnlyList<JsonElement> cur, Action<string, string, Level, string> add)
+    {
+        static bool IsType(JsonElement e, string name) =>
+            e.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == name;
+        var cmp = cur.Where(e => IsType(e, "outer_compare")).ToList();
+        var prom = cur.Where(e => IsType(e, "outer_promote")).ToList();
+        var reg = cur.Where(e => IsType(e, "outer_registry")).ToList();
+        if (cmp.Count == 0 && prom.Count == 0 && reg.Count == 0)
+        {
+            add("Outer/Registry", "Outer Loop", Level.NotTested, "今回のログに outer_* なし（フラグ OFF か未実行）");
+            return;
+        }
+        string? summary = null;
+        for (int i = reg.Count - 1; i >= 0; i--)
+        {
+            var s = Str(reg[i], "summary");
+            if (!string.IsNullOrEmpty(s)) { summary = s; break; }
+        }
+        add("Outer/Registry", "Champion", reg.Count > 0 ? Level.Info : Level.NotTested,
+            summary ?? $"outer_registry {reg.Count}");
+        int can = cmp.Count(e => Str(e, "can_promote") is "True" or "true");
+        add("Outer/Registry", "Compare", cmp.Count > 0 ? Level.Info : Level.NotTested,
+            $"outer_compare {cmp.Count}・can_promote {can}（ライブ入力増なし）");
+        add("Outer/Registry", "Promote", prom.Count > 0 ? Level.Info : Level.NotTested,
+            $"outer_promote {prom.Count}（第二フラグ必須）");
     }
 
     /// <summary>S6: structured_goal / skill_record / plan_propose を件数表示（達成数は良し悪しに使わない）。</summary>

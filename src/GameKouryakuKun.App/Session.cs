@@ -413,6 +413,9 @@ public sealed class PlaySession
             _peStore = null;
             try { _intrinsicStore?.Dispose(); } catch { }
             _intrinsicStore = null;
+            try { FlushOuterRegistry("session_end"); } catch { }
+            try { _modelRegistry?.Dispose(); } catch { }
+            _modelRegistry = null;
             try { _vnextKernel?.Dispose(); } catch { }
             _vnextKernel = null;
             foreach (var b in _inputs) try { b.Dispose(); } catch { }
@@ -422,6 +425,7 @@ public sealed class PlaySession
                 ("pe_summary", RuntimeFlags.AttachCausalWm ? PeLoop.SummaryLine() : null),
                 ("intrinsic_stats", RuntimeFlags.UseIntrinsicMixer ? IntrinsicStats.SummaryLine() : null),
                 ("structured_goals", RuntimeFlags.UseStructuredGoals), ("skill_lib", RuntimeFlags.UseStructuredGoals ? SkillLibrary.SummaryLine() : null), ("structured_soft_adopts", StructuredSoftAdopts),
+                ("outer_loop", RuntimeFlags.EnableOuterLoop), ("outer_promote", RuntimeFlags.OuterLoopPromoteEnabled), ("outer_registry", RuntimeFlags.EnableOuterLoop && _modelRegistry != null ? _modelRegistry.StatsSummary() : null),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
                 ("input_sent", Delivery.Sent), ("input_delivered", Delivery.Delivered), ("input_failed", Delivery.Failed), ("input_reaction_observed", Delivery.ReactionObserved),
                 ("input_reacted", Delivery.Reacted), ("longest_no_reaction", Delivery.LongestNoReactionStreak), ("agent_steps", AgentSteps), ("human_steps", HumanSteps),
@@ -579,7 +583,10 @@ public sealed class PlaySession
         Emit(RuntimeFlags.IntrinsicMixerStatusText(), RuntimeFlags.UseIntrinsicMixer ? LogLevel.Ok : LogLevel.Info);
         RuntimeFlags.ApplyStructuredGoalsEffective();
         Emit(RuntimeFlags.StructuredGoalsStatusText(), RuntimeFlags.UseStructuredGoals ? LogLevel.Ok : LogLevel.Info);
+        RuntimeFlags.ApplyOuterLoopEffective();
+        Emit(RuntimeFlags.OuterLoopStatusText(), RuntimeFlags.EnableOuterLoop ? LogLevel.Ok : LogLevel.Info);
         if (RuntimeFlags.AttachCausalWm) Emit(PeLoop.SummaryLine(), LogLevel.Info);
+        try { TryRunOuterLoopShell(0); } catch { }
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled)));
@@ -1538,6 +1545,7 @@ public sealed class PlaySession
     private long? _lastActiveExpStep;
     private string? _lastActiveExpAction;
     private IntrinsicStatsStore? _intrinsicStore;
+    private ModelRegistryStore? _modelRegistry;
     /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
     public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
     private PeClosedLoopStore? _peStore;
@@ -2200,6 +2208,82 @@ public sealed class PlaySession
         }
     }
 
+
+    /// <summary>S7: Outer Loop 薄いシェル（replay/fixture 評価。ライブ入力増なし）。</summary>
+    private void TryRunOuterLoopShell(long step)
+    {
+        RuntimeFlags.ApplyOuterLoopEffective();
+        if (!RuntimeFlags.EnableOuterLoop) return;
+        try
+        {
+            _modelRegistry ??= ModelRegistryStore.Open(_env.ProfileDataDir, AppEnv.Version);
+            _env.Log.Write("outer_registry", ("step", step), ("summary", _modelRegistry.StatsSummary()),
+                ("rollback", _modelRegistry.RollbackAvailable()), ("champion", _modelRegistry.ChampionId()));
+
+            var champId = _modelRegistry.ChampionId();
+            if (champId == null) return;
+            var champ = _modelRegistry.GetBundle(champId);
+            if (champ == null) return;
+
+            var cand = new GameKouryakuKun.Core.Outer.ModelBundleSpec
+            {
+                Id = $"candidate/intrinsic-weights@{step}",
+                Kind = GameKouryakuKun.Core.Outer.ModelBundleKinds.Weights,
+                ParentId = champId,
+                Hypothesis = "shift portfolio toward info_gain_pe from intrinsic_stats (fixture)",
+                Origin = "intrinsic_stats",
+                Parameters = new Dictionary<string, double> { ["info_gain_pe"] = 0.3, ["equal_rest"] = 0.175 },
+                Note = "S7 shell candidate; not applied to live mixer",
+            };
+            _modelRegistry.AddCandidate(cand);
+
+            double peChamp = 0.5;
+            double peCand = 0.5;
+            if (IntrinsicStats.AmbiguityFellAfter > 0 && IntrinsicStats.InterruptsApplied > 0)
+                peCand = Math.Max(0.1, peChamp - 0.1);   // 根拠: fixture — 寄与が落ちたあとの PE 代理改善
+            var cm = new GameKouryakuKun.Core.Outer.MetricSnapshot
+            {
+                PeProxy = peChamp, CalibrationGapProxy = 0.2, ContributionInfoGain = 0.1,
+                SampleN = Math.Max(1, (int)IntrinsicStats.MixSteps), Method = "intrinsic_fixture_v1",
+            };
+            var dm = new GameKouryakuKun.Core.Outer.MetricSnapshot
+            {
+                PeProxy = peCand, CalibrationGapProxy = 0.2, ContributionInfoGain = 0.15,
+                SampleN = Math.Max(1, (int)IntrinsicStats.MixSteps), Method = "intrinsic_fixture_v1",
+            };
+            bool canRollbackPath = champId != null;
+            var cmp = GameKouryakuKun.Core.Outer.OuterLoopEvaluator.Compare(champ, cand, cm, dm, rollbackAvailable: canRollbackPath);
+            _modelRegistry.RecordComparison(cmp);
+            _env.Log.Write("outer_compare", ("step", step), ("summary", cmp.SummaryLine()),
+                ("winner", cmp.Winner), ("can_promote", cmp.CanPromote), ("status", cmp.Status),
+                ("reasons", cmp.Reasons.ToList()), ("provenance", cmp.ProvenanceJson));
+
+            if (cmp.CanPromote && RuntimeFlags.OuterLoopPromoteEnabled)
+            {
+                var (ok, detail) = _modelRegistry.TryPromote(cand.Id, promoteFlagEnabled: true, reason: "flagged_promote_after_compare");
+                _env.Log.Write("outer_promote", ("step", step), ("ok", ok), ("detail", detail), ("candidate", cand.Id));
+            }
+        }
+        catch (Exception e)
+        {
+            _env.Log.Write("outer_loop_failed", ("step", step), ("error", e.Message));
+        }
+    }
+
+    private void FlushOuterRegistry(string reason)
+    {
+        RuntimeFlags.ApplyOuterLoopEffective();
+        if (!RuntimeFlags.EnableOuterLoop || _modelRegistry == null) return;
+        try
+        {
+            _env.Log.Write("outer_registry", ("reason", reason), ("summary", _modelRegistry.StatsSummary()),
+                ("rollback", _modelRegistry.RollbackAvailable()), ("champion", _modelRegistry.ChampionId()));
+        }
+        catch (Exception e)
+        {
+            _env.Log.Write("outer_registry_flush_failed", ("reason", reason), ("error", e.Message));
+        }
+    }
 
 private void TryAttachImportance(GameKouryakuKun.Core.Observation.StructuredObservation o, long step)
     {

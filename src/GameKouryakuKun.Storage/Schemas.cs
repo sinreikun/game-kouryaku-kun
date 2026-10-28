@@ -962,4 +962,55 @@ CREATE TABLE intrinsic_tag_contrast(
 INSERT OR REPLACE INTO intrinsic_schema_meta(key, value) VALUES('contract', 's5-intrinsic-active-exp-stats');
 """),
     };
+
+    // ============================================================
+    // model-registry.sqlite（S7: Champion/Candidate。memory.sqlite 非変更）
+    // ============================================================
+    public const string ModelRegistryMetaTable = "registry_schema_meta";
+    public static readonly IReadOnlyList<Migration> ModelRegistry = new[]
+    {
+        new Migration(1, "S7 outer model registry（docs/s7-outer-self-improvement-contract.md）", """
+CREATE TABLE registry_schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE registry_bundles(
+  bundle_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  json TEXT NOT NULL,
+  origin TEXT
+);
+CREATE TABLE champion_pointer(
+  key TEXT PRIMARY KEY,
+  bundle_id TEXT NOT NULL,
+  previous_bundle_id TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE registry_candidates(
+  candidate_id INTEGER PRIMARY KEY,
+  bundle_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  hypothesis TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE registry_comparisons(
+  comparison_id INTEGER PRIMARY KEY,
+  champion_id TEXT NOT NULL,
+  candidate_id TEXT NOT NULL,
+  winner TEXT NOT NULL,
+  can_promote INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  provenance_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE registry_events(
+  event_id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  bundle_id TEXT,
+  detail TEXT,
+  provenance_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+INSERT OR REPLACE INTO registry_schema_meta(key, value) VALUES('contract', 's7-outer-self-improvement-contract');
+"""),
+    };
 }

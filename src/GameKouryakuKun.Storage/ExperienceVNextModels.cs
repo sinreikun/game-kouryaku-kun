@@ -284,4 +284,37 @@ public static class RuntimeFlags
             : "Structured Goals: OFF（既定・SelfGoals/Sequences 同一）";
     }
 
+
+    // --- S7 Outer Self-Improvement（docs/s7-outer-self-improvement-contract.md §4）---
+
+    /// <summary>環境変数名。=1 で Outer 評価・ログ（昇格はしない。既定 OFF）。</summary>
+    public const string OuterLoopEnvName = "GKK_ENABLE_OUTER_LOOP";
+    /// <summary>環境変数名。=1 かつ Outer ON かつ比較合格時のみ Promote 許可（既定 OFF）。</summary>
+    public const string OuterLoopPromoteEnvName = "GKK_OUTER_LOOP_PROMOTE";
+
+    public static bool EnableOuterLoop { get; set; }
+    public static bool OuterLoopPromoteEnabled { get; set; }
+
+    public static bool OuterLoopEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(OuterLoopEnvName), "1", StringComparison.Ordinal);
+
+    public static bool OuterLoopPromoteEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(OuterLoopPromoteEnvName), "1", StringComparison.Ordinal);
+
+    public static void ApplyOuterLoopEffective()
+    {
+        EnableOuterLoop = OuterLoopEnvForcesOn;
+        OuterLoopPromoteEnabled = OuterLoopPromoteEnvForcesOn;
+    }
+
+    public static string OuterLoopStatusText()
+    {
+        ApplyOuterLoopEffective();
+        if (!EnableOuterLoop)
+            return "Outer Loop: OFF（既定・評価も昇格もしない）";
+        return OuterLoopPromoteEnabled
+            ? "Outer Loop: ON+PROMOTE（GKK_ENABLE_OUTER_LOOP=1 かつ GKK_OUTER_LOOP_PROMOTE=1）"
+            : "Outer Loop: ON evaluate-only（GKK_ENABLE_OUTER_LOOP=1・昇格フラグ OFF）";
+    }
+
 }
