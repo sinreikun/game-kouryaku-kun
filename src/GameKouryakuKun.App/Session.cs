@@ -409,6 +409,7 @@ public sealed class PlaySession
                     ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource))); } catch (Exception e) { Emit("探索の終了記録に失敗: " + e.Message, LogLevel.Warn); }
             try { FlushPeClosedLoop("session_end"); } catch { }
             try { FlushIntrinsicStats("session_end"); } catch { }
+            try { TryEmitLongHorizonSnapshot(-1, "session_end"); } catch { }
             try { _peStore?.Dispose(); } catch { }
             _peStore = null;
             try { _intrinsicStore?.Dispose(); } catch { }
@@ -587,6 +588,7 @@ public sealed class PlaySession
         Emit(RuntimeFlags.OuterLoopStatusText(), RuntimeFlags.EnableOuterLoop ? LogLevel.Ok : LogLevel.Info);
         if (RuntimeFlags.AttachCausalWm) Emit(PeLoop.SummaryLine(), LogLevel.Info);
         try { TryRunOuterLoopShell(0); } catch { }
+        try { TryEmitLongHorizonSnapshot(0, "session_start"); } catch { }
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
                 ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled)));
@@ -2213,6 +2215,66 @@ public sealed class PlaySession
         }
     }
 
+
+
+    /// <summary>S8: 長期スイート要約ログ（フラグ ON 時は詳細。OFF でも軽量 snapshot 可だが既定はフラグ連動）。</summary>
+    private void TryEmitLongHorizonSnapshot(long step, string reason)
+    {
+        RuntimeFlags.ApplyLongHorizonSuiteEffective();
+        RuntimeFlags.ApplyOuterLoopEffective();
+        if (!RuntimeFlags.EnableLongHorizonSuite && reason != "session_end") return;
+        try
+        {
+            var peProxies = new List<double>();
+            // outer_compare ログは別経路。ここでは in-memory PE 代理を1点だけ
+            if (PeLoop.Enqueued > 0)
+            {
+                var prefs = PeLoop.PreferredCounts();
+                long tot = prefs.Values.Sum();
+                double und = tot > 0 ? (double)prefs.GetValueOrDefault("undecided") / tot : 0.5;
+                peProxies.Add(Math.Clamp(und, 0.05, 1.0));
+            }
+            var input = new GameKouryakuKun.Core.LongHorizon.LongHorizonInput
+            {
+                PeStatsSummary = PeLoop.SummaryLine(),
+                PeEnqueued = PeLoop.Enqueued,
+                PePending = PeLoop.PendingCount,
+                IntrinsicStatsSummary = IntrinsicStats.SummaryLine(),
+                IntrinsicMixSteps = IntrinsicStats.MixSteps,
+                IntrinsicInterrupts = IntrinsicStats.InterruptsApplied,
+                IntrinsicBlockedBudget = IntrinsicStats.BlockedBudget,
+                IntrinsicAmbiguityFell = IntrinsicStats.AmbiguityFellAfter,
+                RegistrySummary = _modelRegistry?.StatsSummary(),
+                ChampionId = _modelRegistry?.ChampionId(),
+                RegistryRollbackAvailable = _modelRegistry?.RollbackAvailable() ?? false,
+                SoftAdopts = StructuredSoftAdopts,
+                HumanSwitches = Human?.Switches ?? 0,
+                OuterLoopEnabled = RuntimeFlags.EnableOuterLoop,
+                OuterPromoteEnabled = RuntimeFlags.OuterLoopPromoteEnabled,
+                SupervisorRecoveries = Supervisor.Events.Count,
+                LiveRoiDeferHints = 0,
+                RecentPeProxies = peProxies.Count >= 1 ? peProxies : null,
+                SaveApiAbsent = true,
+            };
+            var rep = GameKouryakuKun.Core.LongHorizon.LongHorizonHealth.Build(input);
+            int warn = rep.Checks.Count(c => c.Level == GameKouryakuKun.Core.LongHorizon.LhLevel.Warn);
+            _env.Log.Write("long_horizon_snapshot",
+                ("step", step), ("reason", reason), ("summary", rep.SummaryLine),
+                ("warn_count", warn), ("suite", RuntimeFlags.EnableLongHorizonSuite),
+                ("eval", GameKouryakuKun.Core.LongHorizon.EvalSuiteHooks.DescribeAll()),
+                ("checks", rep.Checks.Select(c => new Dictionary<string, object?>
+                {
+                    ["name"] = c.Name, ["level"] = c.Level.ToString(), ["detail"] = c.Detail,
+                }).Take(24).ToList()));
+            if (RuntimeFlags.EnableLongHorizonSuite)
+                _env.Log.Write("long_horizon_suite", ("step", step), ("summary", rep.SummaryLine),
+                    ("hooks", GameKouryakuKun.Core.LongHorizon.EvalSuiteHooks.All.Select(e => e.Id).ToList()));
+        }
+        catch (Exception e)
+        {
+            _env.Log.Write("long_horizon_failed", ("step", step), ("reason", reason), ("error", e.Message));
+        }
+    }
 
     /// <summary>S7: Outer Loop — 同一経験スライスの MetricSnapshot + 任意 promote/weight apply。ライブ入力増なし。</summary>
     private void TryRunOuterLoopShell(long step)

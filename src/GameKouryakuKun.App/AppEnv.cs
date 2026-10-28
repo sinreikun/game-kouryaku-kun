@@ -230,6 +230,8 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine(RuntimeFlags.StructuredGoalsStatusText());
         RuntimeFlags.ApplyOuterLoopEffective();
         summary.AppendLine(RuntimeFlags.OuterLoopStatusText());
+        RuntimeFlags.ApplyLongHorizonSuiteEffective();
+        summary.AppendLine(RuntimeFlags.LongHorizonSuiteStatusText());
         try
         {
             var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
@@ -263,6 +265,19 @@ public sealed class AppEnv : IDisposable
             else summary.AppendLine("model-registry.sqlite: なし（Outer Loop フラグ OFF か未 open）");
         }
         catch (Exception e) { summary.AppendLine("model-registry.sqlite: 確認失敗 " + e.Message); }
+        try
+        {
+            var lh = LongHorizonAggregator.FromProfile(
+                ProfileDataDir, Memory?.Db,
+                outerEnabled: RuntimeFlags.EnableOuterLoop,
+                outerPromote: RuntimeFlags.OuterLoopPromoteEnabled);
+            var rep = GameKouryakuKun.Core.LongHorizon.LongHorizonHealth.Build(lh);
+            summary.AppendLine(rep.SummaryLine);
+            summary.AppendLine("eval_suite: " + GameKouryakuKun.Core.LongHorizon.EvalSuiteHooks.DescribeAll());
+            foreach (var c in rep.Checks.Where(x => x.Level is GameKouryakuKun.Core.LongHorizon.LhLevel.Warn or GameKouryakuKun.Core.LongHorizon.LhLevel.Fail).Take(8))
+                summary.AppendLine($"long_horizon {c.Level} {c.Name}: {c.Detail}");
+        }
+        catch (Exception e) { summary.AppendLine("long-horizon: 確認失敗 " + e.Message); }
         try
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);

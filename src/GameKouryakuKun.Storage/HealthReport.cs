@@ -589,6 +589,9 @@ public static class HealthReport
         // S7 Outer / Registry（表示のみ）
         AddOuterRegistryFromLogs(cur, Add);
 
+        // S8 Long-horizon（表示のみ）
+        AddLongHorizonFromLogs(cur, Add);
+
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();
         sb.AppendLine($"健全性レポート（ゲームに依らないシステム動作だけ。プレイ内容は評価しない）: 総合 {Mark(res.Overall)}");
@@ -803,6 +806,39 @@ public static class HealthReport
             $"outer_compare {cmp.Count}・can_promote {can}（ライブ入力増なし）");
         add("Outer/Registry", "Promote", prom.Count > 0 ? Level.Info : Level.NotTested,
             $"outer_promote {prom.Count}（第二フラグ必須）");
+    }
+
+
+    /// <summary>S8: long_horizon_snapshot / safety を件数表示。</summary>
+    internal static void AddLongHorizonFromLogs(IReadOnlyList<JsonElement> cur, Action<string, string, Level, string> add)
+    {
+        static bool IsType(JsonElement e, string name) =>
+            e.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == name;
+        var snaps = cur.Where(e => IsType(e, "long_horizon_snapshot")).ToList();
+        var suite = cur.Where(e => IsType(e, "long_horizon_suite")).ToList();
+        if (snaps.Count == 0 && suite.Count == 0)
+        {
+            add("長期自律", "Long-horizon", Level.NotTested, "今回のログに long_horizon_* なし（スイート追加ログ OFF か未実行。集約は AppEnv/診断で可）");
+            return;
+        }
+        string? summary = null;
+        for (int i = snaps.Count - 1; i >= 0; i--)
+        {
+            var s = Str(snaps[i], "summary");
+            if (!string.IsNullOrEmpty(s)) { summary = s; break; }
+        }
+        if (summary == null)
+        {
+            for (int i = suite.Count - 1; i >= 0; i--)
+            {
+                var s = Str(suite[i], "summary");
+                if (!string.IsNullOrEmpty(s)) { summary = s; break; }
+            }
+        }
+        add("長期自律", "Snapshot", Level.Info, summary ?? $"long_horizon_snapshot {snaps.Count}");
+        int warn = snaps.Count(e => Str(e, "warn_count") is { Length: > 0 } s && s != "0");
+        add("長期自律", "Safety/Growth", snaps.Count > 0 ? Level.Info : Level.NotTested,
+            $"snapshots {snaps.Count}・suite_logs {suite.Count}・warn_marked {warn}（馬鹿プレイは FAIL にしない）");
     }
 
     /// <summary>S6: structured_goal / skill_record / plan_propose を件数表示（達成数は良し悪しに使わない）。</summary>

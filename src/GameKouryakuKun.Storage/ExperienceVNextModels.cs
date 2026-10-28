@@ -317,4 +317,29 @@ public static class RuntimeFlags
             : "Outer Loop: ON evaluate-only（GKK_ENABLE_OUTER_LOOP=1・昇格フラグ OFF）";
     }
 
+
+    // --- S8 Long-horizon Autonomy（docs/s8-long-horizon-autonomy-contract.md §5）---
+
+    /// <summary>環境変数名。=1 で long_horizon_* 追加ログ（既定 OFF。Health 集約はデータがあれば表示可）。</summary>
+    public const string LongHorizonSuiteEnvName = "GKK_LONG_HORIZON_SUITE";
+
+    public static bool EnableLongHorizonSuite { get; set; }
+
+    public static bool LongHorizonSuiteEnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(LongHorizonSuiteEnvName), "1", StringComparison.Ordinal);
+
+    public static void ApplyLongHorizonSuiteEffective()
+    {
+        EnableLongHorizonSuite = LongHorizonSuiteEnvForcesOn;
+    }
+
+    public static string LongHorizonSuiteStatusText()
+    {
+        ApplyLongHorizonSuiteEffective();
+        return EnableLongHorizonSuite
+            ? "Long-horizon Suite: ON（GKK_LONG_HORIZON_SUITE=1・追加ログ）"
+            : "Long-horizon Suite: OFF（既定・探索同一。Health 集約はデータがあれば表示）";
+    }
+
+
 }
