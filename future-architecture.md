@@ -738,7 +738,7 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 1. ~~本文書のレビュー指摘を反映~~ → t113u を §26・付録 B に反映済み
 2. ~~S1 契約~~ → **`docs/s1-runtime-contract.md`**（Experience レコード・ModelBundle・Kernel ステップ API・Adapter / LossReport・ファイル配置）
 3. ~~旧 DB アダプタ垂直スライス~~ → `OldExperienceAdapter` + `experience-vnext.sqlite`（学習ロジック変更なし・旧 DB read-only・Session 未配線）
-4. **次:** 実機 `memory.sqlite` で Adapter の LossReport 分布を確認（vNext のみ書込）→ Kernel 空シェルをフラグ裏に
+4. ~~実機 Adapter Replay~~ → `src/audit/v0.33.1-adapter-replay.md`（v0.32.9 診断・62,626 手・旧 DB ハッシュ不変）。**次:** Kernel 空シェルをフラグ裏に
 5. その後 S2 で Sensor Stack に GT/Track/EntityExperience を移植
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。

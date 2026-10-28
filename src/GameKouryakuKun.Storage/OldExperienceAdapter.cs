@@ -54,8 +54,9 @@ public sealed class OldExperienceAdapter : IDisposable
 
     /// <summary>
     /// 直近 limit 件（seq 降順で切ってから昇順）を vNext DTO へ変換。persistTo があれば experience-vnext.sqlite へ書く。
+    /// retainRecords=false のとき戻り値の Records は空（件数は Loss.MappedCount。大容量 Replay 用）。
     /// </summary>
-    public AdapterResult ConvertRecent(int limit = 100, string? modelBundleId = null, ExperienceVNextStore? persistTo = null, string appVersion = "0.33.1")
+    public AdapterResult ConvertRecent(int limit = 100, string? modelBundleId = null, ExperienceVNextStore? persistTo = null, string appVersion = "0.33.1", bool retainRecords = true)
     {
         var bundle = string.IsNullOrWhiteSpace(modelBundleId) ? ExperienceVNextContract.DefaultLegacyBundleId : modelBundleId;
         var loss = new LossReport
@@ -72,18 +73,16 @@ public sealed class OldExperienceAdapter : IDisposable
         {
             loss.AddDropped("table_missing", "experience_stream");
             loss.MappedCount = 0;
-            long? rid = PersistLossOnly(persistTo, loss, bundle, appVersion);
-            return new AdapterResult(Array.Empty<ExperienceRecord>(), loss, rid);
+            long? rid0 = PersistLossOnly(persistTo, loss, bundle, appVersion);
+            return new AdapterResult(Array.Empty<ExperienceRecord>(), loss, rid0);
         }
 
         bool hasDecision = TableExists("decision_records");
         bool hasStructured = TableExists("structured_observations");
-        // stream 側の action_source は v10 以降
         bool streamHasSource = ColumnExists("experience_stream", "action_source");
         if (!hasDecision) loss.AddDropped("table_missing", "decision_records");
         if (!hasStructured) loss.AddDropped("table_missing", "structured_observations");
 
-        // S1 で写さない付帯表（件数だけ）
         foreach (var side in new[] { "reaction_maps", "goal_events", "action_sequences", "screen_motion", "growth_snapshots" })
         {
             if (!TableExists(side)) continue;
@@ -110,12 +109,71 @@ public sealed class OldExperienceAdapter : IDisposable
                 r.IsDBNull(9) ? null : r.GetString(9),
                 r.IsDBNull(10) ? null : r.GetString(10)),
             ("$l", take));
-        raw.Reverse(); // 時系列昇順
+        raw.Reverse();
 
-        var records = new List<ExperienceRecord>(raw.Count);
+        long minSeq = raw.Count == 0 ? 0 : raw[0].Seq;
+        long maxSeq = raw.Count == 0 ? -1 : raw[^1].Seq;
+
+        // 一括読み（N+1 回避）。同一 seq は最新行を採用し、余剰は Loss に集計。
+        var structuredBySeq = new Dictionary<long, (int Ver, string Json)>();
+        var structuredDup = 0;
+        if (hasStructured && raw.Count > 0)
+        {
+            foreach (var row in Query(
+                         "SELECT seq, schema_version, json FROM structured_observations WHERE seq BETWEEN $a AND $b ORDER BY obs_id ASC",
+                         r => (r.GetInt64(0), r.GetInt32(1), r.GetString(2)),
+                         ("$a", minSeq), ("$b", maxSeq)))
+            {
+                if (structuredBySeq.ContainsKey(row.Item1)) structuredDup++;
+                structuredBySeq[row.Item1] = (row.Item2, row.Item3);
+            }
+            if (structuredDup > 0)
+                loss.AddDropped("duplicate_structured_dropped", "extra structured_observations rows for same seq (kept latest obs_id)", structuredDup);
+        }
+
+        var decisionBySeq = new Dictionary<long, DecisionSnap>();
+        var decisionDup = 0;
+        if (hasDecision && raw.Count > 0)
+        {
+            foreach (var d in Query(
+                         "SELECT seq, decision_id, predicted_next, p_predicted, p_change, surprisal, excess, candidates_json FROM decision_records WHERE seq BETWEEN $a AND $b ORDER BY decision_id ASC",
+                         r => new DecisionSnap(
+                             r.GetInt64(0),
+                             r.GetInt64(1),
+                             r.IsDBNull(2) ? null : r.GetString(2),
+                             r.IsDBNull(3) ? null : r.GetDouble(3),
+                             r.IsDBNull(4) ? null : r.GetDouble(4),
+                             r.IsDBNull(5) ? null : r.GetDouble(5),
+                             r.IsDBNull(6) ? null : r.GetDouble(6),
+                             r.IsDBNull(7) ? null : r.GetString(7)),
+                         ("$a", minSeq), ("$b", maxSeq)))
+            {
+                if (decisionBySeq.ContainsKey(d.Seq)) decisionDup++;
+                decisionBySeq[d.Seq] = d;
+            }
+            if (decisionDup > 0)
+                loss.AddDropped("duplicate_decision_dropped", "extra decision_records rows for same seq (kept latest decision_id)", decisionDup);
+        }
+
+        var records = retainRecords ? new List<ExperienceRecord>(raw.Count) : new List<ExperienceRecord>();
         var basename = System.IO.Path.GetFileName(_path);
         var nowIso = SqliteDb.Iso(_now());
 
+        long? lossId = null;
+        if (persistTo != null)
+        {
+            persistTo.EnsureBundle(bundle, JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["producer"] = "legacy-adapter",
+                ["note"] = "placeholder bundle for adapted legacy rows",
+                ["app_version"] = appVersion,
+            }));
+            // LossReport は後で最終集計を書く。先に experiences を書くため仮 id は provenance に後入れしない簡略：
+            // 契約どおり loss_report_id を持つため、空レポートを先に差し、後で UPDATE はしない（旧 DB 方針に合わせ vNext も追記のみ）。
+            // → experiences の provenance には loss_report_id を後付けせず、loss_reports に最終 JSON を1行追記する。
+        }
+
+        var mapped = 0;
         foreach (var s in raw)
         {
             string actionSource;
@@ -139,32 +197,26 @@ public sealed class OldExperienceAdapter : IDisposable
 
             if (hasStructured)
             {
-                var structs = Query(
-                    "SELECT obs_id, schema_version, json FROM structured_observations WHERE seq=$q ORDER BY obs_id DESC",
-                    r => (r.GetInt64(0), r.GetInt32(1), r.GetString(2)),
-                    ("$q", s.Seq));
-                if (structs.Count > 0)
+                if (structuredBySeq.TryGetValue(s.Seq, out var st))
                 {
                     kind = ObservationKind.Structured;
-                    obsVer = structs[0].Item2;
-                    obsJson = structs[0].Item3;
+                    obsVer = st.Ver;
+                    obsJson = st.Json;
                     joined.Add("structured_observations");
-                    if (structs.Count > 1)
-                        loss.AddDropped("duplicate_structured_dropped", $"seq={s.Seq}", structs.Count - 1);
                 }
                 else
                 {
                     kind = ObservationKind.LegacyCoarse;
-                    loss.AddDropped("no_structured_observation", $"seq={s.Seq}", 1);
+                    loss.AddDropped("no_structured_observation", "stream row without structured_observations", 1);
                     if (!string.IsNullOrEmpty(s.State) || !string.IsNullOrEmpty(s.NextState))
-                        loss.AddInferred("legacy_state_as_opaque_token", $"seq={s.Seq} state/next_state copied as opaque tokens", 1);
+                        loss.AddInferred("legacy_state_as_opaque_token", "state/next_state copied as opaque tokens", 1);
                 }
             }
             else
             {
                 kind = ObservationKind.LegacyCoarse;
                 if (!string.IsNullOrEmpty(s.State) || !string.IsNullOrEmpty(s.NextState))
-                    loss.AddInferred("legacy_state_as_opaque_token", $"seq={s.Seq} state/next_state copied as opaque tokens", 1);
+                    loss.AddInferred("legacy_state_as_opaque_token", "state/next_state copied as opaque tokens", 1);
             }
 
             string? predictionJson = null;
@@ -172,23 +224,11 @@ public sealed class OldExperienceAdapter : IDisposable
             double? excess = s.Excess;
             if (hasDecision)
             {
-                var decs = Query(
-                    "SELECT decision_id, predicted_next, p_predicted, p_change, surprisal, excess, candidates_json FROM decision_records WHERE seq=$q ORDER BY decision_id DESC",
-                    r => new DecisionSnap(
-                        r.GetInt64(0),
-                        r.IsDBNull(1) ? null : r.GetString(1),
-                        r.IsDBNull(2) ? null : r.GetDouble(2),
-                        r.IsDBNull(3) ? null : r.GetDouble(3),
-                        r.IsDBNull(4) ? null : r.GetDouble(4),
-                        r.IsDBNull(5) ? null : r.GetDouble(5),
-                        r.IsDBNull(6) ? null : r.GetString(6)),
-                    ("$q", s.Seq));
-                if (decs.Count == 0)
-                    loss.AddDropped("no_decision_record", $"seq={s.Seq}", 1);
+                if (!decisionBySeq.TryGetValue(s.Seq, out var d))
+                    loss.AddDropped("no_decision_record", "stream row without decision_records", 1);
                 else
                 {
                     joined.Add("decision_records");
-                    var d = decs[0];
                     predictionJson = JsonSerializer.Serialize(new Dictionary<string, object?>
                     {
                         ["predicted_next"] = d.PredictedNext,
@@ -199,8 +239,6 @@ public sealed class OldExperienceAdapter : IDisposable
                     });
                     if (surprisal is null) surprisal = d.Surprisal;
                     if (excess is null) excess = d.Excess;
-                    if (decs.Count > 1)
-                        loss.AddDropped("duplicate_decision_dropped", $"seq={s.Seq}", decs.Count - 1);
                 }
             }
 
@@ -215,10 +253,10 @@ public sealed class OldExperienceAdapter : IDisposable
                     ["path_basename"] = basename,
                 },
                 ["joined"] = joined,
-                ["legacy_state_before"] = s.State, // opaque; not a game meaning
+                ["legacy_state_before"] = s.State,
             });
 
-            records.Add(new ExperienceRecord(
+            var rec = new ExperienceRecord(
                 ExperienceId: null,
                 Seq: s.Seq,
                 RunId: s.RunId,
@@ -237,46 +275,20 @@ public sealed class OldExperienceAdapter : IDisposable
                 ModelBundleId: bundle,
                 ProvenanceJson: provenance,
                 SourceDb: basename,
-                SourceSeq: s.Seq));
+                SourceSeq: s.Seq);
+
+            if (persistTo != null)
+                persistTo.AppendExperience(rec);
+            if (retainRecords)
+                records.Add(rec);
+            mapped++;
         }
 
-        loss.MappedCount = records.Count;
-        long? lossId = null;
+        loss.MappedCount = mapped;
         if (persistTo != null)
-        {
-            persistTo.EnsureBundle(bundle, JsonSerializer.Serialize(new Dictionary<string, object?>
-            {
-                ["producer"] = "legacy-adapter",
-                ["note"] = "placeholder bundle for adapted legacy rows",
-                ["app_version"] = appVersion,
-            }));
             lossId = persistTo.AppendLossReport(loss);
-            // loss_report_id を provenance に足して書き直すのは重いので、records はそのまま・report は別表
-            foreach (var rec in records)
-                persistTo.AppendExperience(rec with
-                {
-                    ProvenanceJson = InjectLossReportId(rec.ProvenanceJson, lossId.Value),
-                });
-        }
 
         return new AdapterResult(records, loss, lossId);
-    }
-
-    private static string InjectLossReportId(string provenanceJson, long id)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(provenanceJson);
-            var dict = new Dictionary<string, object?>();
-            foreach (var p in doc.RootElement.EnumerateObject())
-                dict[p.Name] = JsonSerializer.Deserialize<object>(p.Value.GetRawText());
-            dict["loss_report_id"] = id;
-            return JsonSerializer.Serialize(dict);
-        }
-        catch (JsonException)
-        {
-            return provenanceJson;
-        }
     }
 
     private long? PersistLossOnly(ExperienceVNextStore? persistTo, LossReport loss, string bundle, string appVersion)
@@ -297,7 +309,6 @@ public sealed class OldExperienceAdapter : IDisposable
 
     private bool ColumnExists(string table, string column)
     {
-        // PRAGMA table_info はパラメータ化できない表名なので、存在確認済みの固定名のみ
         if (!TableExists(table)) return false;
         using var q = _c.CreateCommand();
         q.CommandText = $"PRAGMA table_info(\"{table.Replace("\"", "\"\"")}\")";
@@ -339,6 +350,6 @@ public sealed class OldExperienceAdapter : IDisposable
         double? ChangeRatio, double? Surprisal, double? Excess, string? ActionSource, string? CreatedAt);
 
     private sealed record DecisionSnap(
-        long DecisionId, string? PredictedNext, double? PPredicted, double? PChange,
+        long Seq, long DecisionId, string? PredictedNext, double? PPredicted, double? PChange,
         double? Surprisal, double? Excess, string? CandidatesJson);
 }
