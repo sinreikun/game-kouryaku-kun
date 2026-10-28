@@ -20,6 +20,7 @@
 | パス | 内容 |
 |------|------|
 | `future-architecture.md` | 最終目標からの全面再設計（KEEP/REBUILD/REMOVE/MISSING・新ロードマップ） |
+| `docs/s1-runtime-contract.md` | S1: Experience vNext / Kernel / OldDbAdapter の実装契約 |
 | `src/` | .NET ソリューション（WPF 本体・Core・Storage・OCR・テストなど） |
 | `src/GameKouryakuKun.sln` | ソリューション |
 | `src/profiles/` | ゲーム接続用プロファイル（身体条件のみ） |
