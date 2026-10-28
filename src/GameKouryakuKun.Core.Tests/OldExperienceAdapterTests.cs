@@ -98,13 +98,13 @@ public class OldExperienceAdapterTests
     }
 
     [Fact]
-    public void Runtime_flag_defaults_off_and_is_not_wired_to_session()
+    public void Runtime_flag_defaults_off()
     {
         Assert.False(RuntimeFlags.UseExperienceVNextWriter);
         var session = File.ReadAllText(Path.Combine(SrcRoot(), "GameKouryakuKun.App", "Session.cs"));
-        Assert.DoesNotContain("UseExperienceVNextWriter", session);
-        Assert.DoesNotContain("OldExperienceAdapter", session);
-        Assert.DoesNotContain("ExperienceVNextStore", session);
+        Assert.DoesNotContain("OldExperienceAdapter", session); // Adapter は Session から呼ばない（Replay 専用）
+        Assert.Contains("VNextDualAppend", session);
+        Assert.Contains("UseExperienceVNextWriter", session);
     }
 
     [Fact]

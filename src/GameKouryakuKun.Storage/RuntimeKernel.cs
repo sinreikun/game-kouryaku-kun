@@ -23,7 +23,7 @@ public sealed class RuntimeKernel : IDisposable
     public ExperienceVNextStore Store => _store;
     public string VNextPath => _store.Path;
 
-    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.2", Func<DateTime>? utcNow = null)
+    public RuntimeKernel(ExperienceVNextStore store, string appVersion = "0.33.3", Func<DateTime>? utcNow = null)
     {
         _store = store;
         _appVersion = appVersion;
@@ -40,7 +40,7 @@ public sealed class RuntimeKernel : IDisposable
     }
 
     /// <summary>profileDataDir 配下の experience-vnext.sqlite を開く（memory.sqlite には触れない）。</summary>
-    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.2", Func<DateTime>? utcNow = null)
+    public static RuntimeKernel Open(string profileDataDir, string appVersion = "0.33.3", Func<DateTime>? utcNow = null)
     {
         var path = ExperienceVNextStore.DefaultPath(profileDataDir);
         var store = ExperienceVNextStore.Open(path, appVersion, utcNow);
@@ -62,21 +62,27 @@ public sealed class RuntimeKernel : IDisposable
         var source = NormalizeSource(action.ActionSource, action.LogicalKey);
         var bundle = string.IsNullOrWhiteSpace(ctx.ModelBundleId) ? ShellBundleId : ctx.ModelBundleId!;
 
+        var inferred = new List<Dictionary<string, object?>>();
+        if (bundle == ShellBundleId)
+            inferred.Add(new Dictionary<string, object?> { ["code"] = "model_bundle_placeholder", ["detail"] = $"{ShellBundleId} (S1 empty shell)" });
+        if (ctx.Inferred != null)
+            foreach (var (code, detail) in ctx.Inferred)
+                inferred.Add(new Dictionary<string, object?> { ["code"] = code, ["detail"] = detail });
+
         var provenance = JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["writer"] = "runtime_kernel",
             ["kernel_version"] = KernelVersion,
             ["model_bundle_id"] = bundle,
             ["shell"] = true,
+            ["call_site"] = ctx.CallSite ?? "direct",
             ["source"] = new Dictionary<string, object?>
             {
-                ["kind"] = "live_step_shell",
-                ["note"] = "empty shell: caller-supplied observation/result; no Session replacement",
+                ["kind"] = ctx.CallSite == "session_dual_append" ? "session_dual_append" : "live_step_shell",
+                ["note"] = "empty shell: caller-supplied observation/result; learning remains on memory.sqlite",
             },
             ["legacy_state_before"] = ctx.LegacyStateBefore,
-            ["inferred"] = bundle == ShellBundleId
-                ? new[] { new Dictionary<string, object?> { ["code"] = "model_bundle_placeholder", ["detail"] = $"{ShellBundleId} (S1 empty shell)" } }
-                : Array.Empty<object>(),
+            ["inferred"] = inferred,
         });
 
         var rec = new ExperienceRecord(
@@ -140,7 +146,11 @@ public sealed record StepContext(
     double? Surprisal = null,
     double? Excess = null,
     string? LegacyStateBefore = null,
-    string? ModelBundleId = null);
+    string? ModelBundleId = null,
+    /// <summary>変換時の推定・欠落の明示（ゲーム意味禁止）。provenance に載せる。</summary>
+    IReadOnlyList<(string Code, string Detail)>? Inferred = null,
+    /// <summary>呼び出し経路（例 session_dual_append）。</summary>
+    string? CallSite = null);
 
 /// <summary>Step の結果。フラグ OFF なら Wrote=false。</summary>
 public sealed record StepResult(bool Wrote, bool SkippedBecauseFlagOff, long? ExperienceId, ExperienceRecord? Record);

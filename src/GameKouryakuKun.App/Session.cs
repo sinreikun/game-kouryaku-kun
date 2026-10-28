@@ -218,6 +218,8 @@ public sealed class PlaySession
     public IReadOnlyList<Hypothesis> Hypotheses => Volatile.Read(ref _hypotheses);
     private const int HypothesisRefreshSteps = 10;   // 根拠: 汎用（表示の更新の間隔。毎手まとめ直すと関係の数に比例して時間がかかる）
     private long _lastSeq;
+    /// <summary>v0.33.3: フラグ ON のときだけ experience-vnext へ併記する空シェル（学習は Memory のまま）</summary>
+    private RuntimeKernel? _vnextKernel;
     public int PredictionChecks { get; private set; }
     public int PredictionHits { get; private set; }
     public int ModelRevisions { get; private set; }
@@ -404,6 +406,8 @@ public sealed class PlaySession
             foreach (var b in _inputs) try { b.ReleaseAll(); } catch { }
             if (RunId is long id)
                 try { _env.Memory.EndRun(id, endReason, Json.Obj(("stop_reason", StopReason), ("steps", Step))); } catch (Exception e) { Emit("探索の終了記録に失敗: " + e.Message, LogLevel.Warn); }
+            try { _vnextKernel?.Dispose(); } catch { }
+            _vnextKernel = null;
             foreach (var b in _inputs) try { b.Dispose(); } catch { }
             _env.Log.Write("session_end", ("reason", endReason), ("stop_reason", StopReason), ("steps", Step), ("duration_s", Math.Round(_runClock.Elapsed.TotalSeconds, 1)),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
@@ -547,6 +551,12 @@ public sealed class PlaySession
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl)));
         var panels = new PanelDetector();
         var book = new ScreenModeBook();
+        // v0.33.3: 試験用。環境変数 GKK_USE_EXPERIENCE_VNEXT=1 で dual-append を ON（既定 OFF・学習は memory.sqlite のまま）
+        if (string.Equals(Environment.GetEnvironmentVariable("GKK_USE_EXPERIENCE_VNEXT"), "1", StringComparison.Ordinal))
+        {
+            RuntimeFlags.UseExperienceVNextWriter = true;
+            Emit("experience-vnext への併記を有効化しました（GKK_USE_EXPERIENCE_VNEXT=1）。学習 DB は従来どおり memory.sqlite です", LogLevel.Ok);
+        }
         try { book.Load(_env.Memory.LoadScreenModes()); } catch (Exception e) { Emit("画面の種類の読込に失敗: " + e.Message, LogLevel.Warn); }
         // 見た目の状態（細かい配置）と遷移の特徴（別々の表現）・区画とキーの反応の対応表（記録と報告だけ）
         var vbook = new VisualStateBook();
@@ -1115,6 +1125,8 @@ public sealed class PlaySession
             // v0.29.0: この手の観測（文字を含む）を作り終えてから次の手を決める（1 手 = 1 完全な観測）
             ReadTextEachStep(step, curNode, ca.Name, ca.IsWait || isHuman ? (ca.IsWait ? "wait" : "human") : "agent", node2, after, b.BoundaryMs,
                 st.Seq, "v" + vis2, changedNow, natural.Rates(curNode)?.Change).GetAwaiter().GetResult();
+            // v0.33.3 dual-append: 旧 memory 学習はそのまま。フラグ ON のときだけ vNext へ併記（失敗しても探索は続ける）
+            TryDualAppendVNext(st, ca, source, curNode, node2, changedNow, so, check, prediction);
             if (!ca.IsWait && !isHuman && Frontier != null)
             {
                 Frontier.Observe(curNode, ca.Name, node2, explorer.Discoveries > discBefore, explorer.Nodes.TryGetValue(node2, out var ns2) ? explorer.Actions.Count(a => !a.IsWait && a.Group is not (ActionGroup.Sequence or ActionGroup.Chord) && (ns2.Actions.GetValueOrDefault(a.Name)?.Tries ?? 0) == 0) : 0, stepGain);
@@ -1488,6 +1500,79 @@ public sealed class PlaySession
     /// v0.27.2: 手の結果の静止した画面の文字を、手の流れを止めずに読む（同時に 1 つ。読み取り中なら読まずに数える）。
     /// 変わった区画だけを読み、同じ見た目の区画は前の結果を使う。届いたら: 前の手の結果の文字との差を（手の前の状態, 手）の観測にし、前景の鍵の文字の配置を更新する
     /// </summary>
+
+    /// <summary>
+    /// v0.33.3 dual-append。フラグ OFF なら即 return。ON なら RuntimeKernel で experience-vnext.sqlite へ併記。
+    /// 旧 memory.sqlite の学習記録は触らない。失敗は警告のみ。
+    /// </summary>
+    private void TryDualAppendVNext(StreamStep st, ExploreAction ca, string source, string curNode, string node2, bool changedNow,
+        SequenceObservation so, PredictionCheck check, PredictedOutcome prediction)
+    {
+        if (!RuntimeFlags.UseExperienceVNextWriter) return;
+        try
+        {
+            var inferred = new List<(string Code, string Detail)>();
+            ObservationKind kind;
+            string? obsJson = null;
+            int? obsVer = null;
+            var latest = LatestObservation;
+            if (latest != null)
+            {
+                kind = ObservationKind.Structured;
+                obsJson = latest.ToJson();
+                obsVer = latest.Schema;
+            }
+            else
+            {
+                kind = ObservationKind.LegacyCoarse;
+                inferred.Add(("no_structured_at_dual_append", "LatestObservation was null; used legacy_coarse"));
+                inferred.Add(("legacy_state_as_opaque_token", "curNode/node2 copied as opaque tokens"));
+            }
+
+            string actionSource = ca.IsWait ? "wait" : source;
+            if (ca.IsWait && source != "wait")
+                inferred.Add(("action_source_mapped", $"session source={source} → wait for wait action"));
+
+            string? predJson = null;
+            try
+            {
+                predJson = Json.Obj(
+                    ("predicted_next", prediction.TopNext),
+                    ("p_top", prediction.PTop),
+                    ("p_change", prediction.PChange),
+                    ("hit", check.Hit),
+                    ("note", "opaque copy from session prediction; not reinterpreted"));
+            }
+            catch { /* ignore prediction serialize */ }
+
+            var ctx = new StepContext(
+                ObservationKind: kind,
+                Seq: st.Seq,
+                RunId: RunId,
+                ObservationJson: obsJson,
+                ObservationSchemaVersion: obsVer,
+                ResultChanged: changedNow,
+                ResultNextState: node2,
+                ResultChangeRatio: st.ChangeRatio,
+                PredictionJson: predJson,
+                Surprisal: so.Surprisal,
+                Excess: so.Excess,
+                LegacyStateBefore: curNode,
+                Inferred: inferred,
+                CallSite: "session_dual_append");
+
+            var result = VNextDualAppend.Try(ref _vnextKernel, _env.ProfileDataDir, AppEnv.Version,
+                new ActionSpec(ca.Name, actionSource), ctx,
+                e => Emit("experience-vnext への併記に失敗: " + e.Message, LogLevel.Warn));
+            if (result is { Wrote: true })
+                _env.Log.Write("vnext_dual_append", ("seq", st.Seq), ("action", ca.Name), ("experience_id", result.ExperienceId));
+        }
+        catch (Exception e)
+        {
+            Emit("experience-vnext への併記に失敗: " + e.Message, LogLevel.Warn);
+        }
+    }
+
     private Task ReadTextEachStep(int step, string before, string action, string source, string after, GameKouryakuKun.Core.Imaging.Frame? frame, double boundaryMs,
         long seq = 0, string? visState = null, bool changedNow = false, double? naturalChange = null)
     {

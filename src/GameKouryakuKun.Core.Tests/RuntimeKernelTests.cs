@@ -110,12 +110,13 @@ public class RuntimeKernelTests
     }
 
     [Fact]
-    public void Session_still_unwired_to_kernel()
+    public void Session_dual_append_is_gated_and_best_effort()
     {
         var session = File.ReadAllText(Path.Combine(SrcRoot(), "GameKouryakuKun.App", "Session.cs"));
-        Assert.DoesNotContain("RuntimeKernel", session);
-        Assert.DoesNotContain("UseExperienceVNextWriter", session);
-        Assert.DoesNotContain("ExperienceVNextStore", session);
+        Assert.Contains("VNextDualAppend.Try", session);
+        Assert.Contains("TryDualAppendVNext", session);
+        Assert.Contains("GKK_USE_EXPERIENCE_VNEXT", session);
+        Assert.Contains("experience-vnext への併記に失敗", session); // 失敗しても止めない
     }
 
     private static string SrcRoot()

@@ -738,7 +738,7 @@ AI コードが Supervisor 設定を攻略知識として読まない（静的�
 1. ~~本文書のレビュー指摘を反映~~ → t113u を §26・付録 B に反映済み
 2. ~~S1 契約~~ → **`docs/s1-runtime-contract.md`**（Experience レコード・ModelBundle・Kernel ステップ API・Adapter / LossReport・ファイル配置）
 3. ~~旧 DB アダプタ垂直スライス~~ → `OldExperienceAdapter` + `experience-vnext.sqlite`（学習ロジック変更なし・旧 DB read-only・Session 未配線）
-4. ~~実機 Adapter Replay~~ → `src/audit/v0.33.1-adapter-replay.md`。~~Kernel 空シェル~~ → `RuntimeKernel` + `src/audit/v0.33.2.md`（フラグ既定 OFF・Session 未配線）。**次:** フラグ裏の dual-append 試験（旧ループ並列・学習は旧のまま）→ S2 契約前に Kernel API を固定
+4. ~~実機 Adapter Replay~~ / ~~Kernel 空シェル~~ / ~~dual-append~~ → `RuntimeKernel` + Session `VNextDualAppend`（`src/audit/v0.33.3.md`、既定 OFF・`GKK_USE_EXPERIENCE_VNEXT=1` で試験）。**次:** 実機でフラグ ON の数手併記を確認 → Kernel API 固定のうえ S2 Sensor Stack
 5. その後 S2 で Sensor Stack に GT/Track/EntityExperience を移植
 
 P-7 並列化やしきい値変更は、S2 契約が安定してから性能 Candidate として扱う。

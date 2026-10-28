@@ -131,7 +131,7 @@ StepResult Step(ActionSpec action, StepContext ctx);
 | Feature flag | `RuntimeFlags.UseExperienceVNextWriter` **既定 false**。true で `RuntimeKernel.Step` が vNext 追記 |
 
 実装: `GameKouryakuKun.Storage.RuntimeKernel`（空シェル）。sense/act/learn はせず、呼び出し側が渡した `ActionSpec` + `StepContext` を Experience に整形するだけ。
-Session / PlaySession へのライブ配線はまだしない（既定動作は今日と同一）。
+Session は dual-append 済み（フラグ OFF なら無操作）。学習ループは memory.sqlite のまま。
 Bundle 既定: `runtime-kernel/shell@0`（provenance に `model_bundle_placeholder`）。
 
 ---
@@ -255,5 +255,5 @@ model_bundles(model_bundle_id, created_at, json)
 ## 11. 次の微小ステップ（示唆）
 
 1. Adapter を診断 Replay ツールから呼び、実機 `memory.sqlite` で LossReport 分布を見る（書込は vNext のみ）
-2. ~~Runtime Kernel 空シェル~~ → `RuntimeKernel`（フラグ裏。Session 未配線）
+2. ~~Runtime Kernel 空シェル / dual-append~~ → `RuntimeKernel` + `VNextDualAppend`（Session 併記・既定 OFF）
 3. その後 S2 で Sensor Stack 契約へ GT / Track を移植
