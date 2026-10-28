@@ -405,11 +405,13 @@ public sealed class PlaySession
         {
             foreach (var b in _inputs) try { b.ReleaseAll(); } catch { }
             if (RunId is long id)
-                try { _env.Memory.EndRun(id, endReason, Json.Obj(("stop_reason", StopReason), ("steps", Step))); } catch (Exception e) { Emit("探索の終了記録に失敗: " + e.Message, LogLevel.Warn); }
+                try { _env.Memory.EndRun(id, endReason, Json.Obj(("stop_reason", StopReason), ("steps", Step),
+                    ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource))); } catch (Exception e) { Emit("探索の終了記録に失敗: " + e.Message, LogLevel.Warn); }
             try { _vnextKernel?.Dispose(); } catch { }
             _vnextKernel = null;
             foreach (var b in _inputs) try { b.Dispose(); } catch { }
             _env.Log.Write("session_end", ("reason", endReason), ("stop_reason", StopReason), ("steps", Step), ("duration_s", Math.Round(_runClock.Elapsed.TotalSeconds, 1)),
+                ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource),
                 ("user_events_pausing", UserEventsPausing), ("user_events_ignored", UserEventsIgnored),
                 ("input_sent", Delivery.Sent), ("input_delivered", Delivery.Delivered), ("input_failed", Delivery.Failed), ("input_reaction_observed", Delivery.ReactionObserved),
                 ("input_reacted", Delivery.Reacted), ("longest_no_reaction", Delivery.LongestNoReactionStreak), ("agent_steps", AgentSteps), ("human_steps", HumanSteps),
@@ -547,16 +549,15 @@ public sealed class PlaySession
         _ = game;
         int maxSteps = _o.MaxSteps > 0 ? _o.MaxSteps : int.MaxValue;
         double timeLimit = _o.TimeLimitSec;
+        // v0.33.4: dual-append 有効状態（env が最優先、次に UI トグル。既定 OFF）
+        RuntimeFlags.ApplyEffective();
+        Emit(RuntimeFlags.StatusText() + "。学習 DB は従来どおり memory.sqlite です",
+            RuntimeFlags.UseExperienceVNextWriter ? LogLevel.Ok : LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
-            notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl)));
+            notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
+                ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled)));
         var panels = new PanelDetector();
         var book = new ScreenModeBook();
-        // v0.33.3: 試験用。環境変数 GKK_USE_EXPERIENCE_VNEXT=1 で dual-append を ON（既定 OFF・学習は memory.sqlite のまま）
-        if (string.Equals(Environment.GetEnvironmentVariable("GKK_USE_EXPERIENCE_VNEXT"), "1", StringComparison.Ordinal))
-        {
-            RuntimeFlags.UseExperienceVNextWriter = true;
-            Emit("experience-vnext への併記を有効化しました（GKK_USE_EXPERIENCE_VNEXT=1）。学習 DB は従来どおり memory.sqlite です", LogLevel.Ok);
-        }
         try { book.Load(_env.Memory.LoadScreenModes()); } catch (Exception e) { Emit("画面の種類の読込に失敗: " + e.Message, LogLevel.Warn); }
         // 見た目の状態（細かい配置）と遷移の特徴（別々の表現）・区画とキーの反応の対応表（記録と報告だけ）
         var vbook = new VisualStateBook();
@@ -636,7 +637,8 @@ public sealed class PlaySession
              "別の画面へ移ったあと戻れなかったことの多い操作は、ほかの操作を一通り試すまで後回しにします。止まるのは停止ボタン・入力が届かないとき・指定の上限だけです。", LogLevel.Ok);
         SetState(SessionState.Running, $"手探り探索（seed={_o.Seed}{(timeLimit > 0 ? $"・{timeLimit / 60:0.#}分" : "")}{(_o.MaxSteps > 0 ? $"・{_o.MaxSteps}手" : "")}）");
         _runClock.Restart();
-        _env.Log.Write("explore_begin", ("run_id", RunId), ("seed", _o.Seed), ("actions", explorer.Actions.Select(a => a.Name).ToList()), ("backend", active.Id));
+        _env.Log.Write("explore_begin", ("run_id", RunId), ("seed", _o.Seed), ("actions", explorer.Actions.Select(a => a.Name).ToList()), ("backend", active.Id),
+            ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled));
 
         var det = new TurnDetector(detOpt, calib.Criteria, calib.IdleMask);
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）

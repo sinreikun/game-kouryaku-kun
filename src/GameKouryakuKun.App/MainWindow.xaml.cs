@@ -19,6 +19,7 @@ using Line = System.Windows.Shapes.Line;
 using Polyline = System.Windows.Shapes.Polyline;
 using GameKouryakuKun.Ocr;
 using GameKouryakuKun.Windows;
+using GameKouryakuKun.Storage;
 
 namespace GameKouryakuKun.App;
 
@@ -111,6 +112,7 @@ public partial class MainWindow : Window
         _pHypo.Text = "（探索を開始すると表示）";
         _pFind.Text = "（探索を開始すると表示）";
         BuildAvailabilityPanel();   // v0.32.5（t106u）: 右側の欄の最後
+        BuildVNextDualAppendPanel(); // v0.33.4（t114u）: 診断・開発用 dual-append トグル（既定 OFF）
         _defaultOrder = _panelTitles.ToList();
         ApplyPanelOrder(GameKouryakuKun.Core.Ui.PanelOrder.Apply(_defaultOrder, _ui!.GetValue(GameKouryakuKun.Core.Ui.PanelOrder.Key)));
 
@@ -155,6 +157,69 @@ public partial class MainWindow : Window
         body.Children.Add(status); body.Children.Add(wrap); body.Children.Add(reset);
         Refresh();
         AddPanelCore("自律探索で使う入力", true, "人が決める（ゲームの知識ではない）", body);
+    }
+
+
+    /// <summary>
+    /// v0.33.4（t114u）: Experience vNext dual-append の診断・開発用 ON/OFF。既定 OFF。
+    /// ui-settings.json の experience_vnext_dual_append に保存。環境変数 GKK_USE_EXPERIENCE_VNEXT=1 は開発用で UI より強い。
+    /// </summary>
+    private TextBlock? _vNextStatus;
+    private CheckBox? _vNextCheck;
+    private void BuildVNextDualAppendPanel()
+    {
+        if (_ui == null) _ui = GameKouryakuKun.Core.Ui.UiSettings.Load(_env.DataRoot);
+        try { RuntimeFlags.LoadUiPreference(_ui.GetValue(RuntimeFlags.SettingsKey)); }
+        catch (Exception ex) { AddLog("Experience vNext 設定を読めませんでした（OFF で始めます）: " + ex.Message, LogLevel.Warn); RuntimeFlags.LoadUiPreference(null); }
+
+        var body = new StackPanel();
+        _vNextStatus = new TextBlock { Style = (Style)FindResource("PanelBody"), TextWrapping = TextWrapping.Wrap };
+        _vNextCheck = new CheckBox
+        {
+            Content = "Experience vNext dual-append",
+            Margin = new Thickness(0, 4, 0, 4),
+            ToolTip = "ON にすると探索中に memory.sqlite 学習に加え experience-vnext.sqlite へ併記します（失敗しても探索は止めません）。既定 OFF。環境変数 GKK_USE_EXPERIENCE_VNEXT=1 があるときは常に ON（開発用）。",
+        };
+        _vNextCheck.IsChecked = RuntimeFlags.UiEnabled;
+        _vNextCheck.Click += (_, _) =>
+        {
+            RuntimeFlags.UiEnabled = _vNextCheck.IsChecked == true;
+            RuntimeFlags.ApplyEffective();
+            try
+            {
+                _ui!.SetValue(RuntimeFlags.SettingsKey, RuntimeFlags.SerializeUiPreference());
+                _env.Log.Write("vnext_dual_append_saved",
+                    ("ui", RuntimeFlags.UiEnabled), ("effective", RuntimeFlags.UseExperienceVNextWriter), ("source", RuntimeFlags.EffectiveSource));
+            }
+            catch (Exception ex) { AddLog("Experience vNext 設定を保存できませんでした: " + ex.Message, LogLevel.Warn); }
+            RefreshVNextStatus();
+            UpdatePanels();
+            AddLog(RuntimeFlags.StatusText(), RuntimeFlags.UseExperienceVNextWriter ? LogLevel.Ok : LogLevel.Info);
+        };
+        var note = new TextBlock
+        {
+            Style = (Style)FindResource("PanelBody"),
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.85,
+            Margin = new Thickness(0, 4, 0, 0),
+            Text = "診断・開発用。学習は常に memory.sqlite。ON でも Sensor Stack / しきい値 / 学習ロジックは変えません。再起動後も保持されます。",
+        };
+        body.Children.Add(_vNextStatus);
+        body.Children.Add(_vNextCheck);
+        body.Children.Add(note);
+        RefreshVNextStatus();
+        AddPanelCore("診断・開発（Experience vNext）", true, "実機試験用。既定 OFF", body);
+    }
+
+    private void RefreshVNextStatus()
+    {
+        RuntimeFlags.ApplyEffective();
+        if (_vNextStatus != null) _vNextStatus.Text = RuntimeFlags.StatusText()
+            + (RuntimeFlags.EnvForcesOn && !RuntimeFlags.UiEnabled
+                ? "\n（環境変数が優先されているため、画面のチェックを外してもこのプロセスでは ON のままです）"
+                : "");
+        if (_vNextCheck != null && _vNextCheck.IsChecked != RuntimeFlags.UiEnabled)
+            _vNextCheck.IsChecked = RuntimeFlags.UiEnabled;
     }
 
     /// <summary>右側の欄を畳むかどうか（表示だけの設定。学習 DB ではなくデータフォルダの ui-settings.json）</summary>
@@ -258,6 +323,11 @@ public partial class MainWindow : Window
         var ocr = (_paddle?.Availability().Ok == true) ? "OCR: PaddleOCR" : _winOcr.Availability().Ok ? "OCR: Windows内蔵" : "OCR: なし";
         Badge(ocr, ocr == "OCR: なし" ? Kind.Bad : _paddle?.Availability().Ok == true ? Kind.Good : Kind.Warn);
         Badge("DB: 記録中", Kind.Good);
+        RuntimeFlags.ApplyEffective();
+        Badge(RuntimeFlags.UseExperienceVNextWriter
+                ? $"vNext併記: ON（{RuntimeFlags.EffectiveSource}）"
+                : "vNext併記: OFF",
+            RuntimeFlags.UseExperienceVNextWriter ? Kind.Warn : Kind.Off);
         Badge(_hotkey.Registered ? "緊急停止キー: 有効" : "緊急停止キー: 登録失敗", _hotkey.Registered ? Kind.Good : Kind.Bad);
         if (s != null)
         {
@@ -304,7 +374,9 @@ public partial class MainWindow : Window
         sb.AppendLine($"緊急停止ホットキー: {(_hotkey.Registered ? _hotkey.Description + "（登録済み）" : "登録失敗")}");
         sb.AppendLine($"OCR: {OcrStatusText()}");
         foreach (var st in _compStatus) sb.AppendLine($"部品 {st.Spec.DisplayName} {st.Spec.Version}: {st.Summary}");
-        sb.Append($"DB: {Path.Combine(_env.ProfileDataDir, "memory.sqlite")} ／ {Path.Combine(_env.DataRoot, "app.sqlite")}");
+        sb.AppendLine($"DB: {Path.Combine(_env.ProfileDataDir, "memory.sqlite")} ／ {Path.Combine(_env.DataRoot, "app.sqlite")}");
+        RuntimeFlags.ApplyEffective();
+        sb.Append(RuntimeFlags.StatusText());
         _pBackend.Text = sb.ToString();
 
         // 現在状態

@@ -100,8 +100,66 @@ public sealed record AdapterResult(IReadOnlyList<ExperienceRecord> Records, Loss
 /// S1 切替フラグ。既定 OFF。PlaySession は置換しない（Session 未配線）。
 /// ON のとき <see cref="RuntimeKernel.Step"/> が experience-vnext.sqlite へ追記する。
 /// </summary>
+/// <summary>
+/// S1 Experience vNext dual-append の有効フラグ。
+/// 優先順位: 環境変数 GKK_USE_EXPERIENCE_VNEXT=1 → 強制 ON（開発用）。
+/// それ以外は ui-settings.json の UI トグル（既定 OFF）。
+/// ON のとき Session が memory.sqlite 学習に加え experience-vnext.sqlite へ併記する。
+/// </summary>
 public static class RuntimeFlags
 {
-    /// <summary>既定 false。true で RuntimeKernel 空シェルが vNext へ Experience を書く（学習・Sensor は動かない）。</summary>
+    public const string SettingsKey = "experience_vnext_dual_append";
+    public const string EnvName = "GKK_USE_EXPERIENCE_VNEXT";
+
+    /// <summary>実際に dual-append するか（Kernel / VNextDualAppend が参照）。</summary>
     public static bool UseExperienceVNextWriter { get; set; }
+
+    /// <summary>UI が望む状態（環境変数より弱い）。ui-settings から復元。</summary>
+    public static bool UiEnabled { get; set; }
+
+    /// <summary>有効化の出どころ: off / ui / env</summary>
+    public static string EffectiveSource { get; private set; } = "off";
+
+    public static bool EnvForcesOn =>
+        string.Equals(Environment.GetEnvironmentVariable(EnvName), "1", StringComparison.Ordinal);
+
+    /// <summary>env と UI から有効フラグを再計算する。</summary>
+    public static void ApplyEffective()
+    {
+        if (EnvForcesOn)
+        {
+            UseExperienceVNextWriter = true;
+            EffectiveSource = "env";
+        }
+        else if (UiEnabled)
+        {
+            UseExperienceVNextWriter = true;
+            EffectiveSource = "ui";
+        }
+        else
+        {
+            UseExperienceVNextWriter = false;
+            EffectiveSource = "off";
+        }
+    }
+
+    public static void LoadUiPreference(string? raw)
+    {
+        UiEnabled = raw is "1" or "true" or "True" or "yes" or "on";
+        ApplyEffective();
+    }
+
+    public static string SerializeUiPreference() => UiEnabled ? "1" : "0";
+
+    /// <summary>診断・Viewer 向けの短い表示。</summary>
+    public static string StatusText()
+    {
+        ApplyEffective();
+        return EffectiveSource switch
+        {
+            "env" => "Experience vNext dual-append: ON（環境変数 GKK_USE_EXPERIENCE_VNEXT=1）",
+            "ui" => "Experience vNext dual-append: ON（画面のトグル）",
+            _ => "Experience vNext dual-append: OFF（既定）",
+        };
+    }
 }

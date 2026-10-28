@@ -188,6 +188,12 @@ public sealed class AppEnv : IDisposable
             foreach (var f in Directory.GetFiles(Path.Combine(rtDir, ".gkk"), "*.lock"))
                 files.Add(("runtime/" + Path.GetFileName(f), f));
         files.Add(("profile/profile.json", Path.Combine(ProfileDataDir, "profile.json")));   // キー割当とウィンドウ条件だけ（攻略知識はない）
+        try
+        {
+            var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(vpath)) files.Add(("experience-vnext.sqlite", vpath));
+        }
+        catch { }
         // 画面の画像は入れない（2026-10-18: 実機確認は診断 zip だけで行い、画像は開かない）。名前と大きさとハッシュだけを一覧にする
         var imageList = new List<string>();
         if (Directory.Exists(ProfileDataDir))
@@ -199,6 +205,21 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine($"実行環境: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}（{System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory()}）"
             + (Environment.GetEnvironmentVariable("GKK_LAUNCHER") != null ? " ゲーム攻略くん.exe 経由で起動" : " 本体を直接起動"));
         foreach (var st in Components.CheckAll()) summary.AppendLine($"部品 {st.Spec.Id}@{st.Spec.Version}: {st.Summary}");
+        // v0.33.4: dual-append の有効状態を zip だけで検証できるように記録（env 優先 → UI → OFF）
+        RuntimeFlags.ApplyEffective();
+        summary.AppendLine(RuntimeFlags.StatusText());
+        summary.AppendLine($"vnext_dual_append effective={RuntimeFlags.UseExperienceVNextWriter} source={RuntimeFlags.EffectiveSource} ui={RuntimeFlags.UiEnabled} env={RuntimeFlags.EnvForcesOn}");
+        try
+        {
+            var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(vpath))
+            {
+                var fi = new FileInfo(vpath);
+                summary.AppendLine($"experience-vnext.sqlite: あり {fi.Length} bytes（最終更新 {fi.LastWriteTime:yyyy-MM-dd HH:mm:ss}）");
+            }
+            else summary.AppendLine("experience-vnext.sqlite: なし（まだ dual-append で書かれていないか、フラグ OFF）");
+        }
+        catch (Exception e) { summary.AppendLine("experience-vnext.sqlite: 確認失敗 " + e.Message); }
         foreach (var r in Memory.Runs(20)) summary.AppendLine($"探索 #{r.RunId}: 開始 {r.StartedAt} 終了 {r.EndedAt ?? "（未記録）"} 理由 {r.EndReason ?? "-"}{(r.EndDetail != null ? "／" + r.EndDetail : "")} ターン {r.TurnsTotal}");
         try { foreach (var r in Recordings.List()) summary.AppendLine($"以前の版の「画面を保存」の残り #{r.RunId}（7日で自動削除）: 画面 {r.Frames} 枚 {r.Bytes / (1024 * 1024)} MB（最終更新 {r.LastWriteUtc.ToLocalTime():yyyy-MM-dd HH:mm}）"); } catch { }
         if (extraSummary != null) foreach (var l in extraSummary) summary.AppendLine(l);

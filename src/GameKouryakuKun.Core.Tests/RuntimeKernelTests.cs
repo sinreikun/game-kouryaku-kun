@@ -5,12 +5,15 @@ using Xunit;
 
 namespace GameKouryakuKun.Core.Tests;
 
+[Collection("RuntimeFlagsSerial")]
 public class RuntimeKernelTests
 {
     public RuntimeKernelTests()
     {
         // 他テストとの干渉を防ぐ
+        RuntimeFlags.UiEnabled = false;
         RuntimeFlags.UseExperienceVNextWriter = false;
+        Environment.SetEnvironmentVariable(RuntimeFlags.EnvName, null);
     }
 
     [Fact]
@@ -115,8 +118,10 @@ public class RuntimeKernelTests
         var session = File.ReadAllText(Path.Combine(SrcRoot(), "GameKouryakuKun.App", "Session.cs"));
         Assert.Contains("VNextDualAppend.Try", session);
         Assert.Contains("TryDualAppendVNext", session);
-        Assert.Contains("GKK_USE_EXPERIENCE_VNEXT", session);
+        Assert.Contains("RuntimeFlags.ApplyEffective", session);
+        Assert.Contains("vnext_dual_append", session);
         Assert.Contains("experience-vnext への併記に失敗", session); // 失敗しても止めない
+        Assert.Contains(RuntimeFlags.EnvName, File.ReadAllText(Path.Combine(SrcRoot(), "GameKouryakuKun.Storage", "ExperienceVNextModels.cs")));
     }
 
     private static string SrcRoot()

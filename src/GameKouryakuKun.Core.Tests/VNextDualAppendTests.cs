@@ -5,9 +5,15 @@ using Xunit;
 
 namespace GameKouryakuKun.Core.Tests;
 
+[Collection("RuntimeFlagsSerial")]
 public class VNextDualAppendTests
 {
-    public VNextDualAppendTests() => RuntimeFlags.UseExperienceVNextWriter = false;
+    public VNextDualAppendTests()
+    {
+        RuntimeFlags.UiEnabled = false;
+        RuntimeFlags.UseExperienceVNextWriter = false;
+        Environment.SetEnvironmentVariable(RuntimeFlags.EnvName, null);
+    }
 
     [Fact]
     public void Flag_off_does_not_grow_vnext_and_does_not_open_kernel()
