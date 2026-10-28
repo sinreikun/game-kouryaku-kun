@@ -2,8 +2,8 @@
 
 - 文書: `docs/s4-importance-attention-contract.md`
 - 拘束上位: `future-architecture.md` §11 Feature Importance・§6.3 観測配分・§30 S4
-- 版: S4-contract-0.1（2026-10-28 / v0.34.0）
-- 対象 Stage: **S4**（重要度スコアと注意重みの契約面 + 薄いシェル。ライブ ROI 変更・S5 探索再設計は後続）
+- 版: S4-contract-0.2（2026-10-28 / v0.34.1）
+- 対象 Stage: **S4**（重要度 + Attention + **可逆ライブ OCR ROI**。S5 探索再設計は後続）
 
 本契約は実装可能な短い仕様である。GT / Track しきい値 / Explorer / Goal / P-7 / 学習報酬は **変更しない**。
 
@@ -67,9 +67,22 @@ importance(f) ≈ 「f を知ると予測損失がどれだけ下がるか」
 2. 高コスト処理への寄与だけ下げる（本スライスは重み記録のみ）
 3. **低頻度再確認の床**（`RareRecheckFloor`）を残す
 4. Viewer 強調・診断に使ってよい。**報酬ラベルにしない**
-5. ライブ capture / GT / Track アルゴリズムは **本スライスでは変えない**（advisory + ログ + Health + Bundle 任意付帯）
+5. ライブ capture / GT / Track アルゴリズムは **変えない**。ライブ ROI は OCR エンジン強度のみ（§3.1）
 
 ---
+
+
+### 3.1 ライブ ROI（v0.34.1・可逆）
+
+| 項目 | 規則 |
+|---|---|
+| フラグ | `GKK_ATTACH_IMPORTANCE=1` かつ `GKK_LIVE_ROI` ≠ `0`（未設定可）。`GKK_LIVE_ROI=0` で advisory のみ |
+| 対象 | **OCR エンジン**（full/region）の呼び出し強度のみ |
+| 非対象 | capture / Global Transform / Track 同一性・しきい値・Explorer |
+| defer | `kind=deferred`: 前手の行を継承 + 区画ハッシュ更新。TextLayer は Inherited。**not_observed にしない** |
+| 床 | `RareRecheckFloor` と `MaxDeferStepsAtFloor` でエンジン強制読み |
+| 可逆 | フラグ OFF で完全に従来どおり |
+| regions/tracks/residual | 本スライスは重み記録・Health のみ（安全なライブフックなし） |
 
 ## 4. PeClosedLoop との接続
 
@@ -86,9 +99,10 @@ importance(f) ≈ 「f を知ると予測損失がどれだけ下がるか」
 
 | 変数 | 既定 | 効果 |
 |---|---|---|
-| `GKK_ATTACH_IMPORTANCE=1` | **OFF** | Session が重要度推定・注意重み・PE 推奨・診断ログを付ける |
+| `GKK_ATTACH_IMPORTANCE=1` | **OFF** | 重要度推定・注意重み・PE 推奨・診断ログ |
+| `GKK_LIVE_ROI` | 未設定=Importance に追随 / `0`=advisory 強制 / `1`=明示 ON | OCR エンジン defer（Importance ON 必須） |
 
-OFF 時: 探索・学習・capture/GT/Track 不変。
+両方 OFF 時: 探索・学習・capture/GT/Track・OCR 強度は不変。
 
 ---
 
@@ -108,18 +122,18 @@ OFF 時: 探索・学習・capture/GT/Track 不変。
 
 ---
 
-## 8. 合格条件（v0.34.0）
+## 8. 合格条件（v0.34.1 / S4 クローズ）
 
-1. 本契約書がある
-2. `FeatureImportanceEstimator` が proxy method で scored レコードを出せる
-3. AttentionWeights が床付きで出る（advisory）
-4. PeClosedLoop に RecommendedStatus が付く（Status は pending のまま可）
-5. フラグ既定 OFF・全テスト緑・`src/audit/v0.34.0.md`・§30.1 更新
+1. ライブ OCR defer がフラグ下で可逆に動く（deferred ≠ not_observed）
+2. rare recheck 床でエンジン強制がある
+3. Health が live vs advisory を区別する
+4. GT/Track/capture 未変更・既定 OFF で探索同一
+5. `src/audit/v0.34.1.md`・§30.1 で **S4 クローズ**・次は S5
 
 ---
 
 ## 9. 次の微小ステップ
 
-1. ライブ ROI 任意接続（フラグ下・可逆）または S4 閉じて **S5**
-2. ablation_replay（Experience vNext / diag replay）
-3. Viewer 強調 UI
+1. **S5** Intrinsic & Active Experiment（本スライスでは開始しない）
+2. regions/tracks ライブ配分（安全フックができてから）
+3. ablation_replay / Viewer 強調

@@ -704,16 +704,28 @@ public static class HealthReport
         var fi = cur.Where(e => IsType(e, "feature_importance")).ToList();
         var at = cur.Where(e => IsType(e, "attention_weights")).ToList();
         var rec = cur.Where(e => IsType(e, "pe_importance_recommend")).ToList();
-        if (fi.Count == 0 && at.Count == 0 && rec.Count == 0)
+        var live = cur.Where(e => IsType(e, "live_roi")).ToList();
+        if (fi.Count == 0 && at.Count == 0 && rec.Count == 0 && live.Count == 0)
         {
-            add("重要度", "Importance/Attention", Level.NotTested, "今回のログに feature_importance / attention_weights なし（フラグ OFF か未実行）");
+            add("重要度", "Importance/Attention", Level.NotTested, "今回のログに feature_importance / attention_weights / live_roi なし（フラグ OFF か未実行）");
             return;
         }
         add("重要度", "特徴重要度レコード", fi.Count > 0 ? Level.Ok : Level.Info, $"feature_importance {fi.Count}");
         string attn = at.Count == 0 ? "なし" : Str(at[^1], "summary");
         if (attn == "") attn = $"attention_weights {at.Count}";
-        add("重要度", "注意重み（advisory）", at.Count > 0 ? Level.Info : Level.NotTested, attn);
+        bool livePol = at.Any(e => Str(e, "live") == "True" || Str(e, "policy") == "live_ocr_defer");
+        add("重要度", "注意重み", at.Count > 0 ? Level.Info : Level.NotTested,
+            (livePol ? "live_ocr_defer／" : "advisory_only／") + attn);
         add("重要度", "PE 推奨", rec.Count > 0 ? Level.Info : Level.NotTested, $"pe_importance_recommend {rec.Count}");
+        if (live.Count == 0)
+            add("重要度", "ライブ ROI", livePol ? Level.Info : Level.NotTested,
+                livePol ? "policy=live_ocr_defer（live_roi イベント未着）" : "advisory_only（GKK_LIVE_ROI=0 か Importance OFF）");
+        else
+        {
+            int def = live.Count(e => Str(e, "mode") == "deferred");
+            int forced = live.Count(e => Str(e, "mode") == "forced_read");
+            add("重要度", "ライブ ROI（OCR）", Level.Ok, $"live_roi {live.Count}・deferred {def}・forced_read {forced}（GT/Track 不変・欠測にしない）");
+        }
     }
 
     private static IEnumerable<string> SafeLines(string path)

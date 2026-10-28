@@ -431,7 +431,8 @@ public sealed class PlaySession
                 ("discoveries_by_kind", Discoveries.Counts().ToDictionary(kv => kv.Key.ToString(), kv => (object?)kv.Value)),
                 ("hypotheses_by_status", Hypotheses.GroupBy(h => $"{h.Kind}.{h.Status}").ToDictionary(g => g.Key, g => (object?)g.Count())),
                 ("ambiguous_observations", AmbiguousObservations), ("timeout_turns", TimeoutTurns), ("motion_masks", MotionMasksLearned),
-                ("wait_turns", WaitTurns), ("ocr_each_step", _o.Ocr != null), ("ocr_requested", Ocr2.Requested), ("ocr_skipped", Ocr2.Skipped), ("ocr_full", Ocr2.Full), ("ocr_region", Ocr2.Region), ("ocr_reused", Ocr2.Reused), ("ocr_cache", Ocr2.Cache), ("ocr_failed_steps", Ocr2.Failed),
+                ("wait_turns", WaitTurns), ("ocr_each_step", _o.Ocr != null), ("ocr_requested", Ocr2.Requested), ("ocr_skipped", Ocr2.Skipped), ("ocr_full", Ocr2.Full), ("ocr_region", Ocr2.Region), ("ocr_reused", Ocr2.Reused), ("ocr_cache", Ocr2.Cache), ("ocr_deferred", Ocr2.Deferred), ("ocr_failed_steps", Ocr2.Failed),
+                ("live_roi_deferred", LiveRoiDeferred), ("live_roi_forced", LiveRoiForcedRead), ("live_roi_considered", LiveRoiConsidered),
                 ("ocr_ms_median", Ocr2.Latency().N > 0 ? Math.Round(Ocr2.Latency().Median, 1) : null), ("ocr_ms_p90", Ocr2.Latency().N > 0 ? Math.Round(Ocr2.Latency().P90, 1) : null), ("ocr_ms_max", Ocr2.Latency().N > 0 ? Math.Round(Ocr2.Latency().Max, 1) : null),
                 ("ocr_area_mean", Ocr2.Full + Ocr2.Region > 0 ? Math.Round(Ocr2.AreaSum / (Ocr2.Full + Ocr2.Region), 3) : null),
                 ("text_fresh", Ocr2.Fresh), ("text_stale", Ocr2.Stale), ("text_pending", Ocr2.Pending), ("text_pairs", Ocr2.Pairs), ("text_unpaired", Ocr2.Unpaired), ("text_changed", Ocr2.TextChanged), ("text_suppressed", Ocr2.Suppressed), ("text_book", TextBook.Summary()), ("text_checks", TextBook.Checks), ("text_hits", TextBook.Hits),
@@ -566,6 +567,9 @@ public sealed class PlaySession
             RuntimeFlags.AttachCausalWm ? LogLevel.Ok : LogLevel.Info);
         RuntimeFlags.ApplyImportanceEffective();
         Emit(RuntimeFlags.ImportanceStatusText(), RuntimeFlags.AttachImportance ? LogLevel.Ok : LogLevel.Info);
+        RuntimeFlags.ApplyImportanceEffective();
+        Emit(GameKouryakuKun.Core.Importance.LiveRoiPolicy.StatusText(RuntimeFlags.AttachImportance),
+            GameKouryakuKun.Core.Importance.LiveRoiPolicy.IsLiveEnabled(RuntimeFlags.AttachImportance) ? LogLevel.Ok : LogLevel.Info);
         if (RuntimeFlags.AttachCausalWm) Emit(PeLoop.SummaryLine(), LogLevel.Info);
         RunId = _env.Memory.BeginRun(profile.ProfileVersion, active.Id, cap.Current?.Id, policyVersion: "explore-0.3",
             notesJson: Json.Obj(("seed", _o.Seed), ("growth_test", _o.GrowthTest), ("max_steps", _o.MaxSteps), ("time_limit_s", timeLimit), ("start_with_human_control", _o.StartWithHumanControl),
@@ -1479,7 +1483,7 @@ public sealed class PlaySession
     public volatile GameKouryakuKun.Core.Causality.CausalComparisonRecord? LatestCausalComparison;
     /// <summary>S3: 短時間 Predictive WM 読み取り（フラグ ON 時。探索・学習は参照しない）。</summary>
     public volatile GameKouryakuKun.Core.Causality.ShortHorizonForecast? LatestShortHorizon;
-    /// <summary>S4: 重要度レポート（フラグ ON 時。探索・学習・ROI ライブは変えない）。</summary>
+    /// <summary>S4: 重要度レポート（フラグ ON 時。ライブ OCR defer は GKK_LIVE_ROI≠0 かつ Importance ON）。</summary>
     public volatile GameKouryakuKun.Core.Importance.ImportanceReport? LatestImportance;
     /// <summary>S3 PE 閉ループ: タグ→特徴候補（フラグ ON 時）。</summary>
     public readonly GameKouryakuKun.Core.Causality.PeClosedLoopRecorder PeLoop = new();
@@ -1633,8 +1637,30 @@ public sealed class PlaySession
             GameKouryakuKun.Core.Ocr.OcrBox? boxOut = null;
             try
             {
-                var (snap, kind, ms, area) = await _textReader.ReadAsync(frame, prev, async f => (await chain.RecognizeAsync(f).ConfigureAwait(false)).Result).ConfigureAwait(false);
+                RuntimeFlags.ApplyImportanceEffective();
+                bool liveRoi = GameKouryakuKun.Core.Importance.LiveRoiPolicy.IsLiveEnabled(RuntimeFlags.AttachImportance);
+                double ocrW = LatestImportance?.Attention?.Ocr ?? 1.0;
+                bool wantDefer = false; string deferReason = "n/a";
+                if (liveRoi && prev != null)
+                {
+                    Interlocked.Increment(ref LiveRoiConsidered);
+                    wantDefer = GameKouryakuKun.Core.Importance.LiveRoiPolicy.ShouldDeferEngineRead(ocrW, _ocrEngineStepsSince, out deferReason);
+                    if (!wantDefer && deferReason == "rare_recheck_floor") Interlocked.Increment(ref LiveRoiForcedRead);
+                }
+                var (snap, kind, ms, area) = await _textReader.ReadAsync(frame, prev, async f => (await chain.RecognizeAsync(f).ConfigureAwait(false)).Result, forceDeferEngine: wantDefer).ConfigureAwait(false);
                 _textLast = snap; _textLastStep = step; snapOut = snap; kindOut = kind; boxOut = _textReader.LastRegion;
+                if (kind is "full" or "region") _ocrEngineStepsSince = 0;
+                else _ocrEngineStepsSince++;
+                if (kind == "deferred")
+                {
+                    Interlocked.Increment(ref LiveRoiDeferred);
+                    _env.Log.Write("live_roi", ("step", step), ("mode", "deferred"), ("ocr_weight", ocrW), ("reason", deferReason),
+                        ("steps_since_engine", _ocrEngineStepsSince), ("policy", "live_ocr_defer"));
+                }
+                else if (liveRoi && wantDefer == false && deferReason == "rare_recheck_floor")
+                    _env.Log.Write("live_roi", ("step", step), ("mode", "forced_read"), ("ocr_weight", ocrW), ("reason", deferReason), ("kind", kind), ("policy", "live_ocr_defer"));
+                else if (liveRoi)
+                    _env.Log.Write("live_roi", ("step", step), ("mode", kind is "full" or "region" ? "engine" : kind), ("ocr_weight", ocrW), ("reason", deferReason), ("kind", kind), ("policy", "live_ocr_defer"));
                 Ocr2.Arrived(step, kind, ms, area);
                 var feat = snap.Features;
                 // v0.28.0: 前景の鍵の文字の配置からは、手によらず変わると分かった文字の区画の行を除く（観測・文字の記録からは除かない）
@@ -1708,6 +1734,9 @@ public sealed class PlaySession
     private GameKouryakuKun.Core.Observation.EntityLayer? _prevEntity;
     private int[] _lastEvents = Array.Empty<int>();
     private string _lastLocalCtx = "none";
+    /// <summary>S4: 直前の OCR エンジン（full/region）からの手数（rare recheck 用）。</summary>
+    private int _ocrEngineStepsSince;
+    public long LiveRoiDeferred, LiveRoiForcedRead, LiveRoiConsidered;
     public GameKouryakuKun.Core.Observation.SkillLocalEffects SkillEffects { get; } = new();
     public GameKouryakuKun.Core.Observation.LocalEventModel LocalEvents { get; } = new();
     private static List<int> ChangedCells(GameKouryakuKun.Core.Ocr.TextSnapshot? a, GameKouryakuKun.Core.Ocr.TextSnapshot b)
@@ -2001,6 +2030,7 @@ public sealed class PlaySession
                 _env.Log.Write("feature_importance",
                     ("step", step), ("feature_id", f.FeatureId), ("score", f.Score), ("method", f.Method), ("status", f.Status),
                     ("evidence", f.EvidenceSummary));
+            bool liveOn = GameKouryakuKun.Core.Importance.LiveRoiPolicy.IsLiveEnabled(true);
             _env.Log.Write("attention_weights",
                 ("step", step),
                 ("summary", report.SummaryLine()),
@@ -2008,7 +2038,8 @@ public sealed class PlaySession
                 ("tracks", report.Attention.Tracks),
                 ("ocr", report.Attention.Ocr),
                 ("residual", report.Attention.Residual),
-                ("policy", report.Attention.Policy));
+                ("policy", liveOn ? "live_ocr_defer" : report.Attention.Policy),
+                ("live", liveOn));
             if (report.RecommendationsWritten > 0)
                 _env.Log.Write("pe_importance_recommend",
                     ("step", step), ("count", report.RecommendationsWritten),

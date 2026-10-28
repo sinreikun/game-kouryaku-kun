@@ -6,7 +6,7 @@ public sealed class TextStepStats
     private readonly object _l = new();
     private readonly List<double> _ms = new();
     private long _lastArrivedStep = long.MinValue;
-    public long Requested, Skipped, Full, Region, Reused, Cache, Failed, Fresh, Stale, Pending, Pairs, Unpaired, TextChanged, Suppressed;
+    public long Requested, Skipped, Full, Region, Reused, Cache, Deferred, Failed, Fresh, Stale, Pending, Pairs, Unpaired, TextChanged, Suppressed;
     public long BusyTurns, IdleTurns; public double BusyBoundary, IdleBoundary, BusyGap, IdleGap; public long BusyGapN, IdleGapN;
     public double AreaSum;
 
@@ -15,7 +15,7 @@ public sealed class TextStepStats
         lock (_l)
         {
             _lastArrivedStep = Math.Max(_lastArrivedStep, step);
-            switch (kind) { case "full": Full++; _ms.Add(ms); AreaSum += area; break; case "region": Region++; _ms.Add(ms); AreaSum += area; break; case "reuse": Reused++; break; case "cache": Cache++; break; }
+            switch (kind) { case "full": Full++; _ms.Add(ms); AreaSum += area; break; case "region": Region++; _ms.Add(ms); AreaSum += area; break; case "reuse": Reused++; break; case "cache": Cache++; break; case "deferred": Deferred++; break; }
         }
     }
 

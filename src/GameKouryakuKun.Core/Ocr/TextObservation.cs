@@ -26,6 +26,8 @@ public sealed class TextReader
     public long RegionReads { get; private set; }
     public long Reused { get; private set; }
     public long CacheHits { get; private set; }
+    /// <summary>S4: Attention によるエンジン defer（継承。欠測にしない）。</summary>
+    public long DeferredReads { get; private set; }
     public double ReadAreaSum { get; private set; }
     /// <summary>v0.29.0: 直前の ReadAsync で読み直した矩形（全体・継承なら null）</summary>
     public OcrBox? LastRegion { get; private set; }
@@ -88,11 +90,20 @@ public sealed class TextReader
     }
 
     /// <summary>計画どおりに読む（engine は矩形の画像を受け取る）。読んだ結果は画面の座標に戻す</summary>
-    public async Task<(TextSnapshot Snap, string Kind, double Ms, double Area)> ReadAsync(Frame f, TextSnapshot? prev, Func<Frame, Task<OcrResult?>> engine)
+    public async Task<(TextSnapshot Snap, string Kind, double Ms, double Area)> ReadAsync(Frame f, TextSnapshot? prev, Func<Frame, Task<OcrResult?>> engine, bool forceDeferEngine = false)
     {
         var p = Plan(f, prev); LastRegion = p.Region;
         if (p.Kind is "reuse") { Reused++; return (new TextSnapshot(f.Id, f.Width, f.Height, p.Kept, p.CellHashes), p.Kind, 0, 0); }
         if (p.Kind is "cache") { CacheHits++; return (new TextSnapshot(f.Id, f.Width, f.Height, p.Kept, p.CellHashes), p.Kind, 0, 0); }
+        // S4 live ROI: soft defer of full/region engine call — inherit previous lines, refresh cell hashes.
+        // Kind "deferred" → TextLayer Inherited（not_observed にしない・永久削除しない）。
+        if (forceDeferEngine && prev != null && prev.Width == f.Width && prev.Height == f.Height)
+        {
+            DeferredReads++;
+            LastRegion = null;
+            var cells = StableCells(f);
+            return (new TextSnapshot(f.Id, f.Width, f.Height, prev.Lines, cells), "deferred", 0, 0);
+        }
         Frame img = f; int ox = 0, oy = 0; double area = 1;
         if (p.Region is { } b) { img = Crop(f, b); ox = b.X; oy = b.Y; area = (double)b.W * b.H / ((double)f.Width * f.Height); RegionReads++; } else FullReads++;
         ReadAreaSum += area;

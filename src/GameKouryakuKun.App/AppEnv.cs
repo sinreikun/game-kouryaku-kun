@@ -217,6 +217,7 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine(RuntimeFlags.CausalWmStatusText());
         summary.AppendLine($"causal_wm_attach effective={RuntimeFlags.AttachCausalWm} env={RuntimeFlags.CausalWmEnvForcesOn}");
         summary.AppendLine($"importance_attach effective={RuntimeFlags.AttachImportance} env={RuntimeFlags.ImportanceEnvForcesOn}");
+        summary.AppendLine(GameKouryakuKun.Core.Importance.LiveRoiPolicy.StatusText(RuntimeFlags.AttachImportance));
         try
         {
             var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);
