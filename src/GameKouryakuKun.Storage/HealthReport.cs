@@ -591,6 +591,7 @@ public static class HealthReport
 
         // S8 Long-horizon（表示のみ）
         AddLongHorizonFromLogs(cur, Add);
+        ThroughputHealth.Add(cur, Add);   // v0.39.x 高速経験収集
 
         var res = new Result(cs, "", "");
         var sb = new StringBuilder();

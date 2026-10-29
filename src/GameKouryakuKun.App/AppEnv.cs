@@ -232,6 +232,7 @@ public sealed class AppEnv : IDisposable
         summary.AppendLine(RuntimeFlags.OuterLoopStatusText());
         RuntimeFlags.ApplyLongHorizonSuiteEffective();
         summary.AppendLine(RuntimeFlags.LongHorizonSuiteStatusText());
+        summary.AppendLine(GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText());
         try
         {
             var pePath = PeClosedLoopStore.DefaultPath(ProfileDataDir);

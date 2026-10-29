@@ -677,6 +677,10 @@ public sealed class PlaySession
             ("vnext_dual_append", RuntimeFlags.UseExperienceVNextWriter), ("vnext_source", RuntimeFlags.EffectiveSource), ("vnext_ui", RuntimeFlags.UiEnabled));
 
         var det = new TurnDetector(detOpt, calib.Criteria, calib.IdleMask);
+        GameKouryakuKun.Core.Throughput.ThroughputFlags.ApplyEffective();   // v0.39.x: 高速経験収集のフラグ（既定 OFF）
+        _env.Log.Write("throughput_flags", ("status", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
+        var stepTiming = GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming ? new GameKouryakuKun.Core.Throughput.StepTiming() : null;   // T0
+        StepTimingRef = stepTiming;
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）
         var background = new BackgroundActivityBook();
         var motion = new MotionMaskBook();
@@ -1005,7 +1009,9 @@ public sealed class PlaySession
             rechoose = 0;
             // 待つ手（中立の観測）はキーを送らない。入力の直後と同じ判定で、何もしないと画面がどうなるかを見る
             bool waiting = ca.IsWait;
+            if (stepTiming != null) { double tst = MonoClock.Now; stepTiming.Mark("decide", tst); stepTiming.SendStarted(tst); }
             var receipt = waiting ? new InputReceipt(true, "none", "wait", MonoClock.Now, MonoClock.Now, 0, "キーを送らずに待つ") : active.Send(action);
+            stepTiming?.Mark("send", MonoClock.Now);
             // A（送達）: OS・入力方式として送れたか。続けて失敗したらシステムの失敗として止める
             if (!waiting && Delivery.Record(receipt))
             {
@@ -1022,6 +1028,7 @@ public sealed class PlaySession
             det.Begin(baseline, receipt.DownAtMs, waiting ? "wait" : action.Describe());
             bool ocrBusyAtTurn = Volatile.Read(ref _ocrBusy) != 0;   // v0.27.2: 文字の読み取り中の手かどうか（画面の取り込み・静止の判定の遅れの比較）
             var b = TurnRunner.Await(det, baseline.Id, cap.WaitForNewFrame, () => MonoClock.Now, PauseReasonNow);
+            stepTiming?.Mark("settle", MonoClock.Now);
             if (b.Kind != TurnKind.Aborted) Ocr2.TurnTiming(ocrBusyAtTurn, b.BoundaryMs, prevAfter == null ? double.NaN : baseline.TimestampMs - prevAfter.TimestampMs);
             if (b.Kind == TurnKind.Timeout) TimeoutTurns++;
             if (b.Kind == TurnKind.Aborted) AbortedTurns++;
@@ -1076,6 +1083,7 @@ public sealed class PlaySession
                 Emit("memory.sqlite への記録に失敗: " + e.Message, LogLevel.Error);
                 if (++dbErrors >= 3) { StopReason = "記録の失敗が3回続いたため中止"; endReason = "abort"; }
             }
+            stepTiming?.Mark("commit", MonoClock.Now);
             var item = new TurnLogItem(DateTime.Now, step, ca.Name, action.Describe(), reason, b.Kind, b.BoundaryMs, b.FirstChangeMs, b.NetChange, b.Note, baseline.Id, baseline.Width, baseline.Height, turnId, node2);
             Last = item;
             Turn?.Invoke(item);
@@ -1173,8 +1181,16 @@ public sealed class PlaySession
             // v0.29.0: この手の観測（文字を含む）を作り終えてから次の手を決める（1 手 = 1 完全な観測）
             ReadTextEachStep(step, curNode, ca.Name, ca.IsWait || isHuman ? (ca.IsWait ? "wait" : "human") : "agent", node2, after, b.BoundaryMs,
                 st.Seq, "v" + vis2, changedNow, natural.Rates(curNode)?.Change).GetAwaiter().GetResult();
+            stepTiming?.Mark("obs_wait", MonoClock.Now);
             // v0.33.3 dual-append: 旧 memory 学習はそのまま。フラグ ON のときだけ vNext へ併記（失敗しても探索は続ける）
             TryDualAppendVNext(st, ca, source, curNode, node2, changedNow, so, check, prediction);
+            if (stepTiming != null)
+            {
+                stepTiming.Mark("post", MonoClock.Now);
+                var ph = stepTiming.EndStep();
+                _env.Log.Write("step_timing", ("step", step), ("decide_ms", Math.Round(ph[0], 1)), ("send_ms", Math.Round(ph[1], 1)), ("settle_ms", Math.Round(ph[2], 1)),
+                    ("commit_ms", Math.Round(ph[3], 1)), ("obs_wait_ms", Math.Round(ph[4], 1)), ("post_ms", Math.Round(ph[5], 1)), ("total_ms", Math.Round(ph.Sum(), 1)), ("boundary_ms", b.BoundaryMs));
+            }
             if (!ca.IsWait && !isHuman && Frontier != null)
             {
                 Frontier.Observe(curNode, ca.Name, node2, explorer.Discoveries > discBefore, explorer.Nodes.TryGetValue(node2, out var ns2) ? explorer.Actions.Count(a => !a.IsWait && a.Group is not (ActionGroup.Sequence or ActionGroup.Chord) && (ns2.Actions.GetValueOrDefault(a.Name)?.Tries ?? 0) == 0) : 0, stepGain);
@@ -1323,6 +1339,9 @@ public sealed class PlaySession
             Changed?.Invoke();
         }
         foreach (var bk in _inputs) bk.ReleaseAll();
+        if (stepTiming != null && stepTiming.Steps > 0)
+            _env.Log.Write("step_timing_summary", ("steps", stepTiming.Steps), ("actions_per_min", Math.Round(stepTiming.ActionsPerMinute(), 1)),
+                ("coverage", Math.Round(stepTiming.CoverageRatio(), 3)), ("median", string.Join(" ", stepTiming.MedianByPhase().Select(k => $"{k.Key}:{k.Value}"))));
         Finishing = true; SetState(State, "終わりの保存中…");   // v0.29.2: 終わりの保存（session_end まで）の間は診断の書き出しを待たせる
         Snap("end", Step);
         RefreshTemporal(temporal, motion);
@@ -1792,6 +1811,7 @@ public sealed class PlaySession
         });
     }
     private readonly HashSet<string> _boundaryStates = new(StringComparer.Ordinal);
+    public GameKouryakuKun.Core.Throughput.StepTiming? StepTimingRef { get; private set; }
     public GameKouryakuKun.Core.Observation.ObservationBuilder ObsBuilder { get; } = new();
     public long ObsSaved, ObsFailed, ObsTextNotObserved;
     public GameKouryakuKun.Core.Observation.EntityTracker Entities { get; } = new();
