@@ -1,7 +1,7 @@
 {
   "protocol": 1,
-  "version": "0.41.0",
-  "sha256": "cd9c6985ddfb5c751e579fbeca612142100b5dc1b2e29a9d704f9332179750b0",
-  "bytes": 8810321,
-  "url": "https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.41.0/app-update-0.41.0.zip"
+  "version": "0.41.1",
+  "sha256": "5c29861f9727341ac1f72f1aa943e62573d45439d06124f28c1fbd45abe6818a",
+  "bytes": 8810384,
+  "url": "https://github.com/sinreikun/game-kouryaku-kun/releases/download/v0.41.1/app-update-0.41.1.zip"
 }
