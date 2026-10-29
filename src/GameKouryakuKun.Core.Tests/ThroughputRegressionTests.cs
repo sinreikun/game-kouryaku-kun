@@ -76,4 +76,13 @@ public class ThroughputRegressionTests
     }
 
     private static int CountOf(string s, string sub) { int n = 0, i = 0; while ((i = s.IndexOf(sub, i, StringComparison.Ordinal)) >= 0) { n++; i += sub.Length; } return n; }
+
+    [Fact]
+    public void Interleaved_comparison_receives_every_turn_result_v0410_real_run()
+    {
+        // v0.41.0 実機: il.Begin/Predict はあったが il.Turn が無く、手 1436 なのに比較の手が 0 件・判定がすべて保留になった
+        var s = Session();
+        Assert.Contains("il.Turn(step, curNode + \"\\u241f\" + ca.Name, b.Kind == TurnKind.NoChange, b.BoundaryMs);", s);
+        Assert.True(s.IndexOf("il.Turn(step", StringComparison.Ordinal) > s.IndexOf("var b = TurnRunner.Await(", StringComparison.Ordinal));
+    }
 }

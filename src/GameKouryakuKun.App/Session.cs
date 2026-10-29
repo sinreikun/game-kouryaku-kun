@@ -1088,6 +1088,7 @@ public sealed class PlaySession
                 lock (_keyTurns) { var kc = _keyTurns.GetValueOrDefault(kk); _keyTurns[kk] = (kc.N + 1, kc.NoChange + (b.Kind == TurnKind.NoChange ? 1 : 0), kc.SettleMsSum + b.BoundaryMs); }
                 if (readyGap != null && !isHuman && !double.IsNaN(gapAtSend) && step > 1) readyGap.Observe(kk, gapAtSend, b.Kind == TurnKind.NoChange);
             }
+            if (il != null && b.Kind != TurnKind.Aborted && !isHuman) il.Turn(step, curNode + "\u241f" + ca.Name, b.Kind == TurnKind.NoChange, b.BoundaryMs);   // v0.41.1: 手の結果を交互の比較へ（v0.41.0 は呼び忘れで照合 0 件）
             if (settleAdapt != null && b.Kind != TurnKind.Aborted)
             {
                 if (!waiting && b.FirstChangeMs is double sfc) settleAdapt.ObserveFirstChange(prevSettleKey!, sfc);
@@ -1274,7 +1275,7 @@ public sealed class PlaySession
             if (_pendingObs != null)
             {
                 double pw0 = MonoClock.Now; _pendingObs.GetAwaiter().GetResult(); _pendingObs = null;
-                if (il != null && _pendingObsStep > 0) { double pwd = MonoClock.Now - pw0; il.AddDuration(_pendingObsStep, pwd); il.AddDuration(step, -pwd); }   // 残りの待ちは観測を出した手の設定の時間
+                if (il != null && _pendingObsStep > 0) { double pwd = MonoClock.Now - pw0; il.AddDuration(_pendingObsStep, pwd); il.AddDuration(step, -pwd); _env.Log.Write("interleave_residual", ("step", step), ("from_step", _pendingObsStep), ("ms", Math.Round(pwd, 1))); }   // 残りの待ちは観測を出した手の設定の時間
             }
             int pendPrev = _pendingObsStep; _pendingObsStep = 0;
             var obsTask = ReadTextEachStep(step, curNode, ca.Name, ca.IsWait || isHuman ? (ca.IsWait ? "wait" : "human") : "agent", node2, after, b.BoundaryMs,
