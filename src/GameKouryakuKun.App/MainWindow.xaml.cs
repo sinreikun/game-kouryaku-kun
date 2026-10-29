@@ -443,6 +443,7 @@ public partial class MainWindow : Window
         PauseButton.IsEnabled = running && s!.State != SessionState.Stopping;
         PauseButton.Content = s?.PauseReasons.Contains(PauseReason.Manual) == true ? "▶ 再開" : "⏸ 一時停止";
         StopButton.IsEnabled = running;
+        ThroughputCompareButton.IsEnabled = !running && !_connecting && !_compareRunning;
         UpdateBanner();
     }
 
@@ -853,14 +854,83 @@ public partial class MainWindow : Window
         RunMinutesBox?.SelectedItem is ComboBoxItem { Tag: string t } && int.TryParse(t, NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) && s >= 0 ? s : 0;
 
     private void Pause_Click(object sender, RoutedEventArgs e) { _session?.TogglePause(); UpdatePanels(); }
-    private void Stop_Click(object sender, RoutedEventArgs e) { _session?.Stop(); AddLog("停止を要求しました（今の手が終わったら止まります）", LogLevel.Warn); UpdatePanels(); }
+    private void Stop_Click(object sender, RoutedEventArgs e) { _compareCancel = true; _session?.Stop(); AddLog("停止を要求しました（今の手が終わったら止まります）", LogLevel.Warn); UpdatePanels(); }
     private void Emergency_Click(object sender, RoutedEventArgs e) => Emergency("画面のボタン");
 
     private void Emergency(string from)
     {
+        _compareCancel = true;
         if (_session == null || _session.State == SessionState.Stopped) { AddLog($"緊急停止（{from}）を受信しました（実行中のセッションはありません）", LogLevel.Warn); return; }
         _session.EmergencyStop(from);
         UpdatePanels();
+    }
+
+    // ======================== v0.40.0 高速化比較の自動実行（t119u: 人に環境変数や複数回の実行をさせない） ========================
+    private bool _compareRunning, _compareCancel;
+
+    private async void ThroughputCompare_Click(object sender, RoutedEventArgs e)
+    {
+        if (_compareRunning || SessionActive) return;
+        _compareRunning = true; _compareCancel = false; UpdatePanels();
+        var segs = new List<GameKouryakuKun.Core.Throughput.SegmentResult>();
+        var failed = new HashSet<string>(StringComparer.Ordinal);
+        int segSec = GameKouryakuKun.Core.Throughput.ThroughputComparison.DefaultSegmentSeconds;
+        string started = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        try
+        {
+            if (_con == null)
+            {
+                AddLog("[高速化比較] ゲームに接続しています…", LogLevel.Info);
+                Connect();
+                for (int i = 0; i < 120 && (_con == null || _connecting); i++) await Task.Delay(250);   // 根拠: 汎用（接続の探索・取得の確認に数秒〜30 秒）
+                if (_con == null) { MessageBox.Show(this, "ゲームに接続できませんでした。ゲームを起動してからもう一度押してください。", "高速化比較"); return; }
+            }
+            _env.Log.Write("throughput_compare", ("phase", "start"), ("segment_seconds", segSec), ("order", "ABCD-DCBA"));
+            AddLog($"[高速化比較] 自動で 8 区間（各 {segSec / 60} 分・ABCD→DCBA）を続けて探索します。終わると比較の報告を入れた診断 zip を書き出します。止めるときは「停止」", LogLevel.Info);
+            foreach (var (idx, block, planned) in GameKouryakuKun.Core.Throughput.ThroughputComparison.Plan())
+            {
+                if (_compareCancel) break;
+                string label = GameKouryakuKun.Core.Throughput.ThroughputComparison.NextLabel(planned, failed);
+                GameKouryakuKun.Core.Throughput.ThroughputFlags.Override = GameKouryakuKun.Core.Throughput.ThroughputComparison.Config(label);
+                string desc = GameKouryakuKun.Core.Throughput.ThroughputComparison.Describe(label) + (label != planned ? $"（{planned} は FAIL のため基準に戻す）" : "");
+                BeginSession(new PlaySessionOptions { AllowSendInput = SendInputCheck.IsChecked == true, MaxSteps = 0, TimeLimitSec = segSec, GrowthTest = GrowthTestCheck.IsChecked == true },
+                    $"[高速化比較] 区間 {idx}/8: {desc}");
+                var s = _session!;
+                await Task.Delay(500);
+                while (s.State != SessionState.Stopped && s.State != SessionState.Idle) await Task.Delay(500);
+                var r = s.LastSegment;
+                if (r != null)
+                {
+                    r = r with { Index = idx, Block = block, EndReason = (label != planned ? $"{planned}→A " : "") + r.EndReason };
+                    segs.Add(r);
+                    if (r.Fail && label != "A") failed.Add(label);
+                    AddLog($"[高速化比較] 区間 {idx}: {r.Actions} 手・{r.ActionsPerMinute:0.0} 手/分・因果保持観測 {r.CioPerMinute:0.0}/分{(r.Fail ? "・FAIL" : "")}", r.Fail ? LogLevel.Warn : LogLevel.Ok);
+                }
+                if (s.EmergencyStopped || s.InputDeliveryFailed) { _compareCancel = true; break; }
+            }
+        }
+        catch (Exception ex) { AddLog("[高速化比較] 失敗: " + ex.Message, LogLevel.Error); }
+        finally
+        {
+            GameKouryakuKun.Core.Throughput.ThroughputFlags.Override = null;   // 既定（すべて OFF）に戻す。既定値は変えない
+            GameKouryakuKun.Core.Throughput.ThroughputFlags.ApplyEffective();
+            _compareRunning = false; UpdatePanels();
+        }
+        // 報告を書いて、診断 zip を自動で書き出す（途中で止めても、そこまでの結果で）
+        try
+        {
+            var vs = GameKouryakuKun.Core.Throughput.ThroughputComparison.Judge(segs);
+            var dir = Path.Combine(_env.DataRoot, AppEnv.ThroughputComparisonDir);
+            Directory.CreateDirectory(dir);
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            File.WriteAllText(Path.Combine(dir, $"comparison-{stamp}.md"), GameKouryakuKun.Core.Throughput.ThroughputComparison.Markdown(segs, vs, AppEnv.Version, started, segSec), new System.Text.UTF8Encoding(false));
+            File.WriteAllText(Path.Combine(dir, $"comparison-{stamp}.json"), GameKouryakuKun.Core.Throughput.ThroughputComparison.Json(segs, vs, AppEnv.Version, started, segSec), new System.Text.UTF8Encoding(false));
+            _env.Log.Write("throughput_compare", ("phase", "end"), ("segments", segs.Count), ("cancelled", _compareCancel),
+                ("verdicts", string.Join(" ", vs.Select(v => $"{v.Label}:{v.Verdict}"))));
+            AddLog("[高速化比較] 判定（助言のみ・既定は変えない）: " + string.Join("／", vs.Select(v => $"{v.Label} {v.Verdict}")), LogLevel.Info);
+            Export_Click(this, new RoutedEventArgs());
+        }
+        catch (Exception ex) { AddLog("[高速化比較] 報告の書き出しに失敗: " + ex.Message, LogLevel.Error); }
     }
 
     private async void Export_Click(object sender, RoutedEventArgs e)

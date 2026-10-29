@@ -22,6 +22,7 @@
           <Button x:Name="OcrButton" Content="OCRテスト" Click="Ocr_Click"/>
           <Button x:Name="SetupButton" Content="セットアップ" Click="Setup_Click"/>
           <Button x:Name="ExportButton" Content="診断データを書き出す" Click="Export_Click" ToolTip="DB（使用中でも一貫したコピー）・ログ・部品の導入記録を1つの zip にまとめ、zip ファイルそのものをクリップボードにコピーします（送り先に Ctrl+V で貼り付け）"/>
+          <Button x:Name="ThroughputCompareButton" Content="高速化比較を自動実行（約35分）" Click="ThroughputCompare_Click" ToolTip="ゲームに接続した状態で押すだけ。A 基準・B パイプライン・C 適応的静止判定・D 全部 を ABCD→DCBA の順に 4 分ずつ自動で探索し、比較の報告を入れた診断 zip を書き出してクリップボードにコピーします。既定の設定は変えません。止めるときは「停止」"/>
           <Rectangle Width="16"/>
           <TextBlock Text="実行時間" VerticalAlignment="Center" Margin="0,0,4,0"/>
           <ComboBox x:Name="RunMinutesBox" Width="80" VerticalAlignment="Center" Margin="0,0,8,0" SelectedIndex="0" ToolTip="手探り探索を終える時間。「なし」のときは停止ボタン・手数上限で止めます">

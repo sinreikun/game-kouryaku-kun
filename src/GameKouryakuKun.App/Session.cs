@@ -681,6 +681,10 @@ public sealed class PlaySession
         var det = new TurnDetector(detOpt, calib.Criteria, calib.IdleMask);
         GameKouryakuKun.Core.Throughput.ThroughputFlags.ApplyEffective();   // v0.39.x: 高速経験収集のフラグ（既定 OFF）
         _env.Log.Write("throughput_flags", ("status", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
+        if (GameKouryakuKun.Core.Throughput.ThroughputFlags.Override is { } segOv)   // v0.40.0: 高速化比較の区間の設定（経験の出どころの印）
+            _env.Log.Write("throughput_segment", ("phase", "start"), ("label", segOv.Label), ("run_id", RunId), ("flags", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
+        WorldChecked = 0; WorldHits = 0; DecisionsRecorded = 0; NoChangeJudged = 0; SegmentAbort = null; RawReplay = "n/a"; LastSegment = null;
+        long obsSaved0 = Interlocked.Read(ref ObsSaved), pairs0 = Interlocked.Read(ref Ocr2.Pairs); int late0 = LateChanges;
         var stepTiming = GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming ? new GameKouryakuKun.Core.Throughput.StepTiming() : null;   // T0
         StepTimingRef = stepTiming;
         Ledger = GameKouryakuKun.Core.Throughput.ThroughputFlags.LedgerActive ? new GameKouryakuKun.Core.Throughput.ObservationLedger() : null;   // T1/T5: 非同期 Observation 契約
@@ -1216,7 +1220,7 @@ public sealed class PlaySession
                 { ObsVisRatio = obsVis, ObsModeRatio = obsMode, FrameAgeMs = frameAge, Ambiguous = ambiguous, ActionSource = source, Attribution = attribution };
             if (ambiguous) AmbiguousObservations++;
             LastDecision = decision;
-            try { _env.Memory.AddDecision(decision); } catch (Exception e) { Emit("判断の記録に失敗: " + e.Message, LogLevel.Warn); }
+            try { _env.Memory.AddDecision(decision); DecisionsRecorded++; } catch (Exception e) { Emit("判断の記録に失敗: " + e.Message, LogLevel.Warn); }
             // 1手サマリーと成長の計器（表示だけ）
             // 自己生成の目的（v0.16.0）: 目的の手の結果で達成・失敗を決め、数手後に学習の進みで価値を更新する（成長の計器は使わない）
             bool goalAchieved = false;
@@ -1236,6 +1240,15 @@ public sealed class PlaySession
                 st.Seq, "v" + vis2, changedNow, natural.Rates(curNode)?.Change);
             if (GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing) _pendingObs = obsTask;
             else obsTask.GetAwaiter().GetResult();
+            if (b.Kind == TurnKind.NoChange && !waiting) NoChangeJudged++;
+            // v0.40.0: 因果の対応が壊れた・静止確定を落とした設定はその場で打ち切る（高速化比較は次の区間で基準へ戻す）
+            if (SegmentAbort == null && ((Ledger?.Violations ?? 0) > 0 || (Bus?.SettleDropped ?? 0) > 0))
+            {
+                SegmentAbort = (Ledger?.Violations ?? 0) > 0 ? $"対応違反 {Ledger!.Violations}" : $"静止確定の間引き {Bus!.SettleDropped}";
+                StopReason = "高速化の設定で FAIL（" + SegmentAbort + "）のため、この設定を打ち切り";
+                _env.Log.Write("throughput_segment", ("phase", "abort"), ("label", GameKouryakuKun.Core.Throughput.ThroughputFlags.SegmentLabel), ("reason", SegmentAbort), ("step", step));
+                Emit("[高速化比較] " + StopReason, LogLevel.Warn);
+            }
             stepTiming?.Mark("obs_wait", MonoClock.Now);
             // v0.33.3 dual-append: 旧 memory 学習はそのまま。フラグ ON のときだけ vNext へ併記（失敗しても探索は続ける）
             TryDualAppendVNext(st, ca, source, curNode, node2, changedNow, so, check, prediction);
@@ -1397,6 +1410,7 @@ public sealed class PlaySession
         if (_rawAgg != null)
         {
             bool ok; try { ok = _rawAgg.VerifyReplay(); } catch { ok = false; }
+            RawReplay = ok ? "ok" : "mismatch";
             _env.Log.Write("raw_agg_summary", ("raw", _rawAgg.RawCount()), ("agg", _rawAgg.Index.Keys), ("run_raw", RawExtraRows), ("run_dup", RawDuplicates),
                 ("dup_ratio", Math.Round(_rawAgg.Index.DuplicateRatio, 4)), ("retention", RawExtraRows + RawAggErrors == 0 ? 1 : Math.Round((double)RawExtraRows / (RawExtraRows + RawAggErrors), 4)),
                 ("errors", RawAggErrors), ("replay_ok", ok.ToString()));
@@ -1416,6 +1430,21 @@ public sealed class PlaySession
                 ("missing", Ledger.Missing), ("violations", Ledger.Violations), ("unresolved", un.Count), ("decided_with_pending", Ledger.DecidedWithPending),
                 ("late_amend_success", Math.Round(m.LateAmendSuccessRate, 4)), ("cio_per_min", Math.Round(m.CausalObservationsPerMinute, 1)), ("actions_per_min", Math.Round(m.ActionsPerMinute, 1)),
                 ("raw_retention", Math.Round(m.RawRetentionRatio, 4)), ("metrics", m.Summary()));
+        }
+        if (GameKouryakuKun.Core.Throughput.ThroughputFlags.Override is { } segEnd)
+        {
+            var m = CurrentThroughput();
+            LastSegment = new GameKouryakuKun.Core.Throughput.SegmentResult
+            {
+                Label = segEnd.Label, Flags = GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText(), Minutes = m.Minutes, Actions = m.Actions,
+                ActionsPerMinute = m.ActionsPerMinute, CioPerMinute = m.CausalObservationsPerMinute, Violations = m.Violations, PendingUnresolved = m.Unresolved,
+                LateAmended = m.LateAmended, Opened = Ledger?.Opened ?? 0, Missing = m.Missing, SettleDropped = Bus?.SettleDropped ?? 0,
+                NoChangeJudged = NoChangeJudged, LateChanges = LateChanges - late0, RawReplay = RawReplay, MemoryCommits = RawCommitted,
+                ObservationsSaved = Interlocked.Read(ref ObsSaved) - obsSaved0, DecisionsRecorded = DecisionsRecorded, WorldChecked = WorldChecked, WorldHits = WorldHits,
+                TextPairs = Interlocked.Read(ref Ocr2.Pairs) - pairs0, MedianSettleMs = stepTiming?.MedianByPhase()["settle"] ?? 0, AbortReason = SegmentAbort, EndReason = StopReason ?? "",
+            };
+            _env.Log.Write("throughput_segment", ("phase", "end"), ("label", segEnd.Label), ("actions", m.Actions), ("actions_per_min", Math.Round(m.ActionsPerMinute, 1)),
+                ("cio_per_min", Math.Round(m.CausalObservationsPerMinute, 1)), ("violations", m.Violations), ("unresolved", m.Unresolved), ("abort", SegmentAbort), ("raw_replay", RawReplay));
         }
         if (stepTiming != null && stepTiming.Steps > 0)
             _env.Log.Write("step_timing_summary", ("steps", stepTiming.Steps), ("actions_per_min", Math.Round(stepTiming.ActionsPerMinute(), 1)),
@@ -1906,6 +1935,11 @@ public sealed class PlaySession
     public GameKouryakuKun.Core.Throughput.ObserverBus? Bus { get; private set; }
     private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
     public long RawCommitted;
+    public long WorldChecked, WorldHits, DecisionsRecorded, NoChangeJudged;
+    public string? SegmentAbort { get; private set; }
+    public string RawReplay { get; private set; } = "n/a";
+    /// <summary>v0.40.0: 高速化比較の区間の結果（Override があるときだけ）</summary>
+    public GameKouryakuKun.Core.Throughput.SegmentResult? LastSegment { get; private set; }
     public GameKouryakuKun.Core.Throughput.NaturalNoiseModel? NoiseModel { get; private set; }
     /// <summary>T3/T5: 観測器を動かす。バスがあれば並列（台帳で元の手・フレームに合流）、なければその場で</summary>
     private void RunObserver(string sensor, int step, long seq, GameKouryakuKun.Core.Imaging.Frame frame, GameKouryakuKun.Core.Throughput.FramePosition pos,
@@ -2024,6 +2058,7 @@ public sealed class PlaySession
                 if ((worldPred ?? _lastWorldPred) is { } wp && wp.Node == before && wp.Action == action && o.Prediction != null)
                 {
                     bool hit = wp.TopNext == after;
+                    Interlocked.Increment(ref WorldChecked); if (hit) Interlocked.Increment(ref WorldHits);
                     o = o with { Prediction = o.Prediction with { WorldNext = wp.TopNext, WorldP = wp.Top.Count > 0 ? Math.Round(wp.Top[0].P, 4) : null, WorldHit = hit } };
                     Coarse.Observe(before, action, hit, surp);
                 }

@@ -22,8 +22,25 @@ public static class ThroughputFlags
 
     private static bool On(string env) => string.Equals(Environment.GetEnvironmentVariable(env), "1", StringComparison.Ordinal);
 
+    /// <summary>
+    /// v0.40.0: アプリ内の自動比較（高速化比較）が区間ごとに設定するフラグの組。設定中は環境変数を見ない（人が環境変数を設定する必要はない）。
+    /// MeasureLedger は計測専用（台帳の記帳だけで挙動を変えない。全区間で因果保持観測/分を同じ物差しで測るため）。
+    /// </summary>
+    public sealed record FlagSet(string Label, bool StepTiming, bool PipelineSensing, bool AdaptiveSettle, bool NaturalNoise, bool RawAggSplit, bool ParallelObservers, bool MeasureLedger = true);
+
+    public static FlagSet? Override { get; set; }
+    public static bool MeasureLedger { get; private set; }
+    public static string? SegmentLabel => Override?.Label;
+
     public static void ApplyEffective()
     {
+        if (Override is { } o)
+        {
+            StepTiming = o.StepTiming; PipelineSensing = o.PipelineSensing; AdaptiveSettle = o.AdaptiveSettle;
+            NaturalNoise = o.NaturalNoise; RawAggSplit = o.RawAggSplit; ParallelObservers = o.ParallelObservers; MeasureLedger = o.MeasureLedger;
+            return;
+        }
+        MeasureLedger = false;
         StepTiming = On(StepTimingEnv);
         PipelineSensing = On(PipelineSensingEnv);
         AdaptiveSettle = On(AdaptiveSettleEnv);
@@ -33,14 +50,14 @@ public static class ThroughputFlags
     }
 
     /// <summary>台帳（ObservationLedger）を使うか: パイプラインか並列観測器のどちらかが ON</summary>
-    public static bool LedgerActive => PipelineSensing || ParallelObservers;
+    public static bool LedgerActive => PipelineSensing || ParallelObservers || MeasureLedger;
 
     public static string StatusText()
     {
         ApplyEffective();
         string F(string n, bool v) => $"{n}={(v ? "ON" : "OFF")}";
         bool any = StepTiming || PipelineSensing || AdaptiveSettle || NaturalNoise || RawAggSplit || ParallelObservers;
-        return "Throughput: " + (any ? "" : "OFF（既定・v0.38.0 と同一経路） ") + string.Join(" ", F("step_timing", StepTiming), F("pipeline_sensing", PipelineSensing),
+        return "Throughput: " + (Override is { } ov ? $"[自動比較 {ov.Label}] " : "") + (any ? "" : "OFF（既定・v0.38.0 と同一経路） ") + string.Join(" ", F("step_timing", StepTiming), F("pipeline_sensing", PipelineSensing),
             F("adaptive_settle", AdaptiveSettle), F("natural_noise", NaturalNoise), F("raw_agg_split", RawAggSplit), F("parallel_observers", ParallelObservers));
     }
 }

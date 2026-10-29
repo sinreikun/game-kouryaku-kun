@@ -14,6 +14,8 @@ public sealed class AppEnv : IDisposable
     public static string Version => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
     public string DataRoot { get; }
+    /// <summary>v0.40.0: 高速化比較の報告を書く場所（データフォルダの下）</summary>
+    public const string ThroughputComparisonDir = "throughput-comparison";
     /// <summary>v0.32.5（t106u）: 自律探索で使ってよい入力（人が決める。画面の右側の欄で切り替え、ui-settings.json に保存）</summary>
     public GameKouryakuKun.Core.Exploration.ActionAvailability Availability { get; } = new();
     public string DataRootReason { get; }
@@ -192,6 +194,10 @@ public sealed class AppEnv : IDisposable
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
             if (File.Exists(vpath)) files.Add(("experience-vnext.sqlite", vpath));
+            var tcDir = Path.Combine(DataRoot, ThroughputComparisonDir);   // v0.40.0: 高速化比較の報告（新しい 3 回分）
+            if (Directory.Exists(tcDir))
+                foreach (var f in Directory.GetFiles(tcDir, "comparison-*.*").OrderByDescending(f => f, StringComparer.Ordinal).Take(6))
+                    files.Add(("throughput-comparison/" + Path.GetFileName(f), f));
             var rapath = RawAggStore.DefaultPath(ProfileDataDir);
             if (File.Exists(rapath)) files.Add((RawAggStore.FileName, rapath));
             var ipath = IntrinsicStatsStore.DefaultPath(ProfileDataDir);
