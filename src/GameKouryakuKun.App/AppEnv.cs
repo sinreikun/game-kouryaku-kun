@@ -198,6 +198,8 @@ public sealed class AppEnv : IDisposable
             if (Directory.Exists(tcDir))
                 foreach (var f in Directory.GetFiles(tcDir, "comparison-*.*").OrderByDescending(f => f, StringComparer.Ordinal).Take(6))
                     files.Add(("throughput-comparison/" + Path.GetFileName(f), f));
+            var tlpath = Path.Combine(ProfileDataDir, PlaySession.ThroughputLearnedFile);
+            if (File.Exists(tlpath)) files.Add((PlaySession.ThroughputLearnedFile, tlpath));
             var rapath = RawAggStore.DefaultPath(ProfileDataDir);
             if (File.Exists(rapath)) files.Add((RawAggStore.FileName, rapath));
             var ipath = IntrinsicStatsStore.DefaultPath(ProfileDataDir);

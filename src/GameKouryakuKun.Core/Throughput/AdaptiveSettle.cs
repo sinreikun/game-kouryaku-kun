@@ -54,13 +54,26 @@ public sealed class AdaptiveSettle
     {
         var s = Get(key);
         s.Late++;
-        ObserveFirstChange(key, LateFactor * usedMs);
-        s.LateFloor = Math.Max(s.LateFloor, LateFactor * usedMs);
-        if (shortened) { LateOnShort++; Reverted++; s.Cooldown = CooldownTurns; }
+        ObserveFirstChange(key, LateFactor * usedMs);   // 打ち切られた遅れは標本として足す（分位が上がる＝安全側）
+        // v0.40.2: 下限を上げるのは、自分が短くした待ちで早すぎたときだけ。全体の値で待って遅れた変化は標本だけに入れる
+        // （v0.40.0 実機: 全体の値 1200 ms での遅れた変化で下限が 2400 ms になり、その画面は二度と短くならなかった）
+        if (shortened) { s.LateFloor = Math.Max(s.LateFloor, LateFactor * usedMs); LateOnShort++; Reverted++; s.Cooldown = CooldownTurns; }
     }
 
     /// <summary>短くした判定のうち早すぎた割合</summary>
     public double LateRate => ShortNoChange == 0 ? 0 : (double)LateOnShort / ShortNoChange;
+
+    /// <summary>v0.40.2: 実行・区間をまたいで持ち越す（画面×手の種類ごとの標本と下限）。データフォルダの JSON</summary>
+    public sealed record Persisted(Dictionary<string, List<double>> First, Dictionary<string, double> LateFloor);
+
+    public Persisted Export() => new(_s.ToDictionary(k => k.Key, k => k.Value.First.ToList()), _s.Where(k => k.Value.LateFloor > 0).ToDictionary(k => k.Key, k => k.Value.LateFloor));
+
+    public void Import(Persisted? p)
+    {
+        if (p == null) return;
+        foreach (var (k, l) in p.First) { var s = Get(k); s.First.Clear(); s.First.AddRange(l.Where(x => x >= 0 && !double.IsNaN(x)).TakeLast(Window)); }
+        foreach (var (k, f) in p.LateFloor) Get(k).LateFloor = Math.Max(Get(k).LateFloor, f);
+    }
 
     public string ScreensSummary() => string.Join(" ", _s.OrderBy(k => k.Key, StringComparer.Ordinal)
         .Select(k => $"{k.Key}:n{k.Value.First.Count}/a{k.Value.Applied}/l{k.Value.Late}"));

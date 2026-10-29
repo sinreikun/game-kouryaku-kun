@@ -690,6 +690,13 @@ public sealed class PlaySession
         Ledger = GameKouryakuKun.Core.Throughput.ThroughputFlags.LedgerActive ? new GameKouryakuKun.Core.Throughput.ObservationLedger() : null;   // T1/T5: 非同期 Observation 契約
         Bus = GameKouryakuKun.Core.Throughput.ThroughputFlags.ParallelObservers && Ledger != null ? new GameKouryakuKun.Core.Throughput.ObserverBus(Ledger, () => MonoClock.Now) : null;   // T5
         var settleAdapt = GameKouryakuKun.Core.Throughput.ThroughputFlags.AdaptiveSettle ? new GameKouryakuKun.Core.Throughput.AdaptiveSettle() : null;   // T2
+        // v0.40.2: 入力を受け付けるまでの間の学習（計測が ON なら観測、パイプライン ON なら間を守る）。学んだ統計は実行をまたいで持ち越す
+        var readyGap = stepTiming != null ? new GameKouryakuKun.Core.Throughput.ReadyGap() : null;
+        var learned = LoadThroughputLearned();
+        if (settleAdapt != null) settleAdapt.Import(learned?.Settle);
+        readyGap?.Import(learned?.ReadyGap);
+        double gapAtSend = double.NaN;
+        lock (_keyTurns) _keyTurns.Clear();
         string? prevSettleKey = null; double prevSettleUsed = 0; bool prevSettleShort = false;
         NoiseModel = GameKouryakuKun.Core.Throughput.ThroughputFlags.NaturalNoise ? new GameKouryakuKun.Core.Throughput.NaturalNoiseModel() : null;   // T3（注釈のみ）
         _pendingObs = null; RawCommitted = 0; RawExtraRows = 0; RawDuplicates = 0; RawAggErrors = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
@@ -964,6 +971,12 @@ public sealed class PlaySession
             catch (Exception e) { Emit("点数の内訳の記録に失敗: " + e.Message, LogLevel.Warn); }
             double since = MonoClock.Now - lastBoundaryAt;
             if (since < profile.Input.MinIntervalMs) Thread.Sleep((int)(profile.Input.MinIntervalMs - since));
+            if (readyGap != null && GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing && !ca.IsWait && !isHuman && step > 1)
+            {
+                // v0.40.2: 速く押すとゲームが入力を受け付けない手が増える（実機 v0.40.0）。同じ (画面, 手) で変化なしが増えないと学んだ間までは待つ
+                double hold = readyGap.HoldFor(MonoClock.Now - lastBoundaryAt, out _);
+                if (hold > 0) Thread.Sleep((int)Math.Ceiling(hold));
+            }
             var baseline = cap.WaitForNewFrame(cap.Current?.LastFrameId ?? 0, 200) ?? cap.LatestFrame();
             if (baseline == null) { Emit("フレームがありません。待機します。", LogLevel.Warn); Thread.Sleep(500); step--; continue; }
             // 「変化なし」と判定した後、次の入力の前に画面が変わっていた＝判定が早すぎた（打ち切られた標本）。待ち時間の自己調整に戻す
@@ -1025,7 +1038,7 @@ public sealed class PlaySession
             // 待つ手（中立の観測）はキーを送らない。入力の直後と同じ判定で、何もしないと画面がどうなるかを見る
             bool waiting = ca.IsWait;
             if (stepTiming != null) { double tst = MonoClock.Now; stepTiming.Mark("decide", tst); stepTiming.SendStarted(tst); }
-            Ledger?.BeginAction(step); _actionsSent++;
+            Ledger?.BeginAction(step); _actionsSent++; gapAtSend = MonoClock.Now - lastBoundaryAt;
             var receipt = waiting ? new InputReceipt(true, "none", "wait", MonoClock.Now, MonoClock.Now, 0, "キーを送らずに待つ") : active.Send(action);
             stepTiming?.Mark("send", MonoClock.Now);
             // A（送達）: OS・入力方式として送れたか。続けて失敗したらシステムの失敗として止める
@@ -1044,18 +1057,25 @@ public sealed class PlaySession
             if (settleAdapt != null)
             {
                 // T2: 変えるのは no-change の待ちだけ（StableMs・差分の基準・上限はそのまま）。待つ手は全体の値（入力なしの観測を短くしない）
-                double nc = waiting ? detOpt.NoChangeTimeoutMs : settleAdapt.Recommend(motionKey, detOpt.NoChangeTimeoutMs, detOpt.StableMs);
+                string settleKey = motionKey + "|" + ca.Group;   // v0.40.2: 画面×手の種類
+                double nc = waiting ? detOpt.NoChangeTimeoutMs : settleAdapt.Recommend(settleKey, detOpt.NoChangeTimeoutMs, detOpt.StableMs);
                 det.Options = det.Options with { NoChangeTimeoutMs = nc };
-                prevSettleKey = motionKey; prevSettleUsed = nc; prevSettleShort = nc < detOpt.NoChangeTimeoutMs;
+                prevSettleKey = settleKey; prevSettleUsed = nc; prevSettleShort = nc < detOpt.NoChangeTimeoutMs;
             }
             det.Begin(baseline, receipt.DownAtMs, waiting ? "wait" : action.Describe());
             bool ocrBusyAtTurn = Volatile.Read(ref _ocrBusy) != 0;   // v0.27.2: 文字の読み取り中の手かどうか（画面の取り込み・静止の判定の遅れの比較）
             var b = TurnRunner.Await(det, baseline.Id, cap.WaitForNewFrame, () => MonoClock.Now, PauseReasonNow);
             stepTiming?.Mark("settle", MonoClock.Now);
+            if (b.Kind != TurnKind.Aborted && !waiting)
+            {
+                string kk = curNode + "\u241f" + ca.Name;
+                lock (_keyTurns) { var kc = _keyTurns.GetValueOrDefault(kk); _keyTurns[kk] = (kc.N + 1, kc.NoChange + (b.Kind == TurnKind.NoChange ? 1 : 0), kc.SettleMsSum + b.BoundaryMs); }
+                if (readyGap != null && !isHuman && !double.IsNaN(gapAtSend) && step > 1) readyGap.Observe(kk, gapAtSend, b.Kind == TurnKind.NoChange);
+            }
             if (settleAdapt != null && b.Kind != TurnKind.Aborted)
             {
-                if (!waiting && b.FirstChangeMs is double sfc) settleAdapt.ObserveFirstChange(motionKey, sfc);
-                if (b.Kind == TurnKind.NoChange && prevSettleShort) settleAdapt.ShortenedNoChange(motionKey);
+                if (!waiting && b.FirstChangeMs is double sfc) settleAdapt.ObserveFirstChange(prevSettleKey!, sfc);
+                if (b.Kind == TurnKind.NoChange && prevSettleShort) settleAdapt.ShortenedNoChange(prevSettleKey!);
             }
             if (b.Kind != TurnKind.Aborted) Ocr2.TurnTiming(ocrBusyAtTurn, b.BoundaryMs, prevAfter == null ? double.NaN : baseline.TimestampMs - prevAfter.TimestampMs);
             if (b.Kind == TurnKind.Timeout) TimeoutTurns++;
@@ -1417,6 +1437,11 @@ public sealed class PlaySession
         }
         if (NoiseModel != null) _env.Log.Write("noise_summary", ("summary", NoiseModel.Summary()), ("screens_with_baseline", NoiseModel.ScreensWithBaseline), ("screens", NoiseModel.Screens),
             ("natural", NoiseModel.NaturalCandidates), ("input", NoiseModel.InputCandidates), ("no_baseline", NoiseModel.NoBaseline));
+        if (settleAdapt != null || readyGap != null)
+        {
+            SaveThroughputLearned(new ThroughputLearned(settleAdapt?.Export() ?? learned?.Settle, readyGap?.Export() ?? learned?.ReadyGap));
+            if (readyGap != null) { ReadyGapSummary = readyGap.Summary(); _env.Log.Write("ready_gap_summary", ("summary", ReadyGapSummary), ("safe_ms", readyGap.SafeGapMs()), ("holds", readyGap.Holds), ("probes", readyGap.Probes)); }
+        }
         if (settleAdapt != null)
             _env.Log.Write("adaptive_settle_summary", ("applied", settleAdapt.Applied), ("reverted", settleAdapt.Reverted), ("short_nochange", settleAdapt.ShortNoChange),
                 ("late_on_short", settleAdapt.LateOnShort), ("late_rate", Math.Round(settleAdapt.LateRate, 4)), ("screens", settleAdapt.ScreensSummary()));
@@ -1440,7 +1465,7 @@ public sealed class PlaySession
                 ActionsPerMinute = m.ActionsPerMinute, CioPerMinute = m.CausalObservationsPerMinute, Violations = m.Violations, PendingUnresolved = m.Unresolved,
                 LateAmended = m.LateAmended, Opened = Ledger?.Opened ?? 0, Missing = m.Missing, SettleDropped = Bus?.SettleDropped ?? 0,
                 NoChangeJudged = NoChangeJudged, LateChanges = LateChanges - late0, RawReplay = RawReplay, MemoryCommits = RawCommitted,
-                ObservationsSaved = Interlocked.Read(ref ObsSaved) - obsSaved0, DecisionsRecorded = DecisionsRecorded, WorldChecked = WorldChecked, WorldHits = WorldHits, WorldByNode = SnapshotWorld(out var psum), WorldPSum = psum,
+                ObservationsSaved = Interlocked.Read(ref ObsSaved) - obsSaved0, DecisionsRecorded = DecisionsRecorded, WorldChecked = WorldChecked, WorldHits = WorldHits, WorldByNode = SnapshotWorld(out var psum), WorldPSum = psum, KeyTurns = SnapshotKeys(), ReadyGapSummary = ReadyGapSummary,
                 TextPairs = Interlocked.Read(ref Ocr2.Pairs) - pairs0, MedianSettleMs = stepTiming?.MedianByPhase()["settle"] ?? 0, AbortReason = SegmentAbort, EndReason = StopReason ?? "",
             };
             _env.Log.Write("throughput_segment", ("phase", "end"), ("label", segEnd.Label), ("actions", m.Actions), ("actions_per_min", Math.Round(m.ActionsPerMinute, 1)),
@@ -1936,6 +1961,30 @@ public sealed class PlaySession
     private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
     public long RawCommitted;
     public long WorldChecked, WorldHits, DecisionsRecorded, NoChangeJudged;
+    private readonly Dictionary<string, (long N, long NoChange, double SettleMsSum)> _keyTurns = new(StringComparer.Ordinal);
+    private Dictionary<string, (long N, long NoChange, double SettleMsSum)> SnapshotKeys() { lock (_keyTurns) return new(_keyTurns, StringComparer.Ordinal); }
+    public string ReadyGapSummary { get; private set; } = "";
+    public sealed record ThroughputLearned(GameKouryakuKun.Core.Throughput.AdaptiveSettle.Persisted? Settle, GameKouryakuKun.Core.Throughput.ReadyGap.Persisted? ReadyGap);
+    public const string ThroughputLearnedFile = "throughput-learned.json";
+    private ThroughputLearned? LoadThroughputLearned()
+    {
+        try
+        {
+            var p = Path.Combine(_env.ProfileDataDir, ThroughputLearnedFile);
+            return File.Exists(p) ? System.Text.Json.JsonSerializer.Deserialize<ThroughputLearned>(File.ReadAllText(p)) : null;
+        }
+        catch (Exception e) { _env.Log.Write("throughput_learned_failed", ("op", "load"), ("error", e.Message)); return null; }
+    }
+    private void SaveThroughputLearned(ThroughputLearned t)
+    {
+        try
+        {
+            var p = Path.Combine(_env.ProfileDataDir, ThroughputLearnedFile);
+            File.WriteAllText(p + ".tmp", System.Text.Json.JsonSerializer.Serialize(t));
+            File.Move(p + ".tmp", p, true);
+        }
+        catch (Exception e) { _env.Log.Write("throughput_learned_failed", ("op", "save"), ("error", e.Message)); }
+    }
     private Dictionary<string, (long N, long Hits)> SnapshotWorld(out double psum) { lock (_worldByNode) { psum = _worldPSum; return new(_worldByNode, StringComparer.Ordinal); } }
     private readonly Dictionary<string, (long N, long Hits)> _worldByNode = new(StringComparer.Ordinal); private double _worldPSum;
     public string? SegmentAbort { get; private set; }
@@ -2061,7 +2110,7 @@ public sealed class PlaySession
                 {
                     bool hit = wp.TopNext == after;
                     Interlocked.Increment(ref WorldChecked); if (hit) Interlocked.Increment(ref WorldHits);
-                    lock (_worldByNode) { var cur = _worldByNode.GetValueOrDefault(before); _worldByNode[before] = (cur.N + 1, cur.Hits + (hit ? 1 : 0)); _worldPSum += wp.Top.Count > 0 ? wp.Top[0].P : 0; }
+                    lock (_worldByNode) { var wk = before + "\u241f" + action; var cur = _worldByNode.GetValueOrDefault(wk); _worldByNode[wk] = (cur.N + 1, cur.Hits + (hit ? 1 : 0)); _worldPSum += wp.Top.Count > 0 ? wp.Top[0].P : 0; }
                     o = o with { Prediction = o.Prediction with { WorldNext = wp.TopNext, WorldP = wp.Top.Count > 0 ? Math.Round(wp.Top[0].P, 4) : null, WorldHit = hit } };
                     Coarse.Observe(before, action, hit, surp);
                 }
