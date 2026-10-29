@@ -29,6 +29,11 @@ public sealed record SegmentResult
     public long WorldChecked { get; init; }
     public long WorldHits { get; init; }
     public long TextPairs { get; init; }
+    /// <summary>v0.40.1: 予測の照合を手の前の画面ごとに（区間ごとに訪れた画面が違うので、同じ画面どうしで比べる）</summary>
+    public IReadOnlyDictionary<string, (long N, long Hits)> WorldByNode { get; init; } = new Dictionary<string, (long, long)>();
+    /// <summary>照合した予測の確率の合計（較正のずれ＝確率の平均と当たった割合の差）</summary>
+    public double WorldPSum { get; init; }
+    public double CalibrationGap => WorldChecked == 0 ? double.NaN : Math.Abs(WorldPSum - WorldHits) / WorldChecked;
     public double MedianSettleMs { get; init; }
     public string? AbortReason { get; init; }         // FAIL で打ち切ったとき
     public string EndReason { get; init; } = "";
@@ -59,6 +64,25 @@ public static class ThroughputComparison
     public const double AdoptMinGain = 0.10;          // 根拠: 診断の合格条件（両ブロックで因果保持観測/分が 1 割以上増えたときだけ採用）
     public const double QualityDropTolerance = 0.05;  // 根拠: 診断の合格条件（記録・観測・判断・予測の付与・文字の対の割合が 5 ポイント以上落ちたら品質の後退）
     public const double HitDropSe = 2;                // 根拠: 汎用（予測の当たりの割合の差が標準誤差の 2 倍を超えて落ちたら後退）
+    public const double StratMinWeight = 30;          // 根拠: 汎用（同じ画面どうしの照合の実効の件数がこれ未満なら、当たりの差は言えない）
+    public const double CalibrationWarnGap = 0.15;    // 根拠: 診断の合格条件（HealthReport.CalibrationWarnGap と同じ）
+
+    /// <summary>
+    /// 同じ画面どうしで比べた予測の当たりの差（x − a）と標準誤差・実効の件数（画面ごとの重み n_x·n_a/(n_x+n_a)）。
+    /// v0.40.0 は区間全体の当たりの割合を比べていたため、区間ごとに訪れた画面の違い（易しい画面・難しい画面）で後退と誤判定した（実機 2026-10-29）。
+    /// </summary>
+    public static (double Diff, double Se, double Weight) StratifiedHitDiff(SegmentResult x, SegmentResult a)
+    {
+        double num = 0, w = 0, var = 0;
+        foreach (var (node, xv) in x.WorldByNode)
+        {
+            if (!a.WorldByNode.TryGetValue(node, out var av) || xv.N == 0 || av.N == 0) continue;
+            double px = (double)xv.Hits / xv.N, pa = (double)av.Hits / av.N, wt = (double)xv.N * av.N / (xv.N + av.N);
+            num += wt * (px - pa); w += wt;
+            var += wt * wt * (px * (1 - px) / xv.N + pa * (1 - pa) / av.N);
+        }
+        return w == 0 ? (double.NaN, double.NaN, 0) : (num / w, Math.Sqrt(var) / w, w);
+    }
 
     public static ThroughputFlags.FlagSet Config(string label) => label switch
     {
@@ -102,12 +126,9 @@ public static class ThroughputComparison
         if (x.ObsRatio < a.ObsRatio - QualityDropTolerance) r.Add($"Replay: 保存した観測の割合 {x.ObsRatio:P0} < 基準 {a.ObsRatio:P0}");
         if (x.DecisionRatio < a.DecisionRatio - QualityDropTolerance) r.Add($"Outer: 判断の記録の割合 {x.DecisionRatio:P0} < 基準 {a.DecisionRatio:P0}");
         if (x.PredictionCheckedRatio < a.PredictionCheckedRatio - QualityDropTolerance) r.Add($"Prediction: 予測と照合した観測の割合 {x.PredictionCheckedRatio:P0} < 基準 {a.PredictionCheckedRatio:P0}");
-        if (!double.IsNaN(x.WorldHitRate) && !double.IsNaN(a.WorldHitRate) && x.WorldChecked > 0 && a.WorldChecked > 0)
-        {
-            double p = (x.WorldHits + a.WorldHits) / (double)(x.WorldChecked + a.WorldChecked);
-            double se = Math.Sqrt(Math.Max(1e-9, p * (1 - p) * (1.0 / x.WorldChecked + 1.0 / a.WorldChecked)));
-            if (a.WorldHitRate - x.WorldHitRate > HitDropSe * se) r.Add($"Prediction: 予測の当たり {x.WorldHitRate:P0} < 基準 {a.WorldHitRate:P0}（2SE 超）");
-        }
+        var (dh, se, wgt) = StratifiedHitDiff(x, a);
+        if (wgt >= StratMinWeight && -dh > HitDropSe * Math.Max(se, 1e-6)) r.Add($"Prediction: 同じ画面どうしの予測の当たり {dh:+0.0%;-0.0%}（2SE 超の低下・実効 {wgt:0} 件）");
+        if (x.CalibrationGap > CalibrationWarnGap && !(a.CalibrationGap > CalibrationWarnGap)) r.Add($"Prediction: 較正のずれ {x.CalibrationGap:0.00} > {CalibrationWarnGap}（基準 {a.CalibrationGap:0.00}）");
         if (x.TextPairRatio < a.TextPairRatio - QualityDropTolerance) r.Add($"Causality: 前後の文字の対を作れた割合 {x.TextPairRatio:P0} < 基準 {a.TextPairRatio:P0}");
         if (x.Violations > 0) r.Add($"Causality: 対応違反 {x.Violations}");
         if (x.PendingUnresolved > 0) r.Add($"Causality: 未解決の pending {x.PendingUnresolved}");
@@ -162,10 +183,11 @@ public static class ThroughputComparison
             sb.AppendLine($"| {s.Index} | {Describe(s.Label)} | {s.Actions} | {F(s.ActionsPerMinute)} | {F(s.CioPerMinute)} | {s.Violations} | {s.PendingUnresolved} | {s.LateAttachRate:P0} | {F(s.MedianSettleMs, "0")} | {s.LateChangeRate:P1} | {s.RawReplay} | {(s.Fail ? "FAIL" + (s.AbortReason != null ? $"（{s.AbortReason}）" : "") : s.Warn ? "WARN" : "PASS")} |");
         sb.AppendLine();
         sb.AppendLine("## 品質の指標（区間ごと）");
-        sb.AppendLine("| # | 設定 | memory 記録 | 観測の保存 | 判断の記録 | 予測と照合 | 予測の当たり | 文字の対 |");
-        sb.AppendLine("|---|---|---|---|---|---|---|---|");
+        sb.AppendLine("| # | 設定 | memory 記録 | 観測の保存 | 判断の記録 | 予測と照合 | 予測の当たり（区間全体・参考） | 較正のずれ | 文字の対 |");
+        sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
         foreach (var s in segs)
-            sb.AppendLine($"| {s.Index} | {s.Label} | {s.CommitRatio:P0} | {s.ObsRatio:P0} | {s.DecisionRatio:P0} | {s.PredictionCheckedRatio:P0} | {(double.IsNaN(s.WorldHitRate) ? "-" : s.WorldHitRate.ToString("P0"))} | {s.TextPairRatio:P0} |");
+            sb.AppendLine($"| {s.Index} | {s.Label} | {s.CommitRatio:P0} | {s.ObsRatio:P0} | {s.DecisionRatio:P0} | {s.PredictionCheckedRatio:P0} | {(double.IsNaN(s.WorldHitRate) ? "-" : s.WorldHitRate.ToString("P0"))} | {(double.IsNaN(s.CalibrationGap) ? "-" : s.CalibrationGap.ToString("0.00"))} | {s.TextPairRatio:P0} |");
+        sb.AppendLine("（予測の当たりの比較は、区間ごとに訪れた画面が違うため、同じ画面どうしで比べる。区間全体の当たりは参考）");
         sb.AppendLine();
         sb.AppendLine("## 判定（基準 A と同じブロックで対にして比較）");
         foreach (var v in vs)
@@ -188,6 +210,7 @@ public static class ThroughputComparison
                 settle_dropped = s.SettleDropped, raw_replay = s.RawReplay, median_settle_ms = s.MedianSettleMs,
                 commit_ratio = s.CommitRatio, obs_ratio = s.ObsRatio, decision_ratio = s.DecisionRatio, prediction_checked_ratio = s.PredictionCheckedRatio,
                 world_hit_rate = double.IsNaN(s.WorldHitRate) ? (double?)null : s.WorldHitRate, text_pair_ratio = s.TextPairRatio,
+                calibration_gap = double.IsNaN(s.CalibrationGap) ? (double?)null : s.CalibrationGap, world_screens = s.WorldByNode.Count,
                 fail = s.Fail, warn = s.Warn, abort_reason = s.AbortReason, end_reason = s.EndReason,
             }),
             verdicts = vs.Select(v => new

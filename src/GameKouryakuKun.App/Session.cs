@@ -683,7 +683,7 @@ public sealed class PlaySession
         _env.Log.Write("throughput_flags", ("status", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
         if (GameKouryakuKun.Core.Throughput.ThroughputFlags.Override is { } segOv)   // v0.40.0: 高速化比較の区間の設定（経験の出どころの印）
             _env.Log.Write("throughput_segment", ("phase", "start"), ("label", segOv.Label), ("run_id", RunId), ("flags", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
-        WorldChecked = 0; WorldHits = 0; DecisionsRecorded = 0; NoChangeJudged = 0; SegmentAbort = null; RawReplay = "n/a"; LastSegment = null;
+        WorldChecked = 0; WorldHits = 0; lock (_worldByNode) { _worldByNode.Clear(); _worldPSum = 0; } DecisionsRecorded = 0; NoChangeJudged = 0; SegmentAbort = null; RawReplay = "n/a"; LastSegment = null;
         long obsSaved0 = Interlocked.Read(ref ObsSaved), pairs0 = Interlocked.Read(ref Ocr2.Pairs); int late0 = LateChanges;
         var stepTiming = GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming ? new GameKouryakuKun.Core.Throughput.StepTiming() : null;   // T0
         StepTimingRef = stepTiming;
@@ -1440,7 +1440,7 @@ public sealed class PlaySession
                 ActionsPerMinute = m.ActionsPerMinute, CioPerMinute = m.CausalObservationsPerMinute, Violations = m.Violations, PendingUnresolved = m.Unresolved,
                 LateAmended = m.LateAmended, Opened = Ledger?.Opened ?? 0, Missing = m.Missing, SettleDropped = Bus?.SettleDropped ?? 0,
                 NoChangeJudged = NoChangeJudged, LateChanges = LateChanges - late0, RawReplay = RawReplay, MemoryCommits = RawCommitted,
-                ObservationsSaved = Interlocked.Read(ref ObsSaved) - obsSaved0, DecisionsRecorded = DecisionsRecorded, WorldChecked = WorldChecked, WorldHits = WorldHits,
+                ObservationsSaved = Interlocked.Read(ref ObsSaved) - obsSaved0, DecisionsRecorded = DecisionsRecorded, WorldChecked = WorldChecked, WorldHits = WorldHits, WorldByNode = SnapshotWorld(out var psum), WorldPSum = psum,
                 TextPairs = Interlocked.Read(ref Ocr2.Pairs) - pairs0, MedianSettleMs = stepTiming?.MedianByPhase()["settle"] ?? 0, AbortReason = SegmentAbort, EndReason = StopReason ?? "",
             };
             _env.Log.Write("throughput_segment", ("phase", "end"), ("label", segEnd.Label), ("actions", m.Actions), ("actions_per_min", Math.Round(m.ActionsPerMinute, 1)),
@@ -1936,6 +1936,8 @@ public sealed class PlaySession
     private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
     public long RawCommitted;
     public long WorldChecked, WorldHits, DecisionsRecorded, NoChangeJudged;
+    private Dictionary<string, (long N, long Hits)> SnapshotWorld(out double psum) { lock (_worldByNode) { psum = _worldPSum; return new(_worldByNode, StringComparer.Ordinal); } }
+    private readonly Dictionary<string, (long N, long Hits)> _worldByNode = new(StringComparer.Ordinal); private double _worldPSum;
     public string? SegmentAbort { get; private set; }
     public string RawReplay { get; private set; } = "n/a";
     /// <summary>v0.40.0: 高速化比較の区間の結果（Override があるときだけ）</summary>
@@ -2059,6 +2061,7 @@ public sealed class PlaySession
                 {
                     bool hit = wp.TopNext == after;
                     Interlocked.Increment(ref WorldChecked); if (hit) Interlocked.Increment(ref WorldHits);
+                    lock (_worldByNode) { var cur = _worldByNode.GetValueOrDefault(before); _worldByNode[before] = (cur.N + 1, cur.Hits + (hit ? 1 : 0)); _worldPSum += wp.Top.Count > 0 ? wp.Top[0].P : 0; }
                     o = o with { Prediction = o.Prediction with { WorldNext = wp.TopNext, WorldP = wp.Top.Count > 0 ? Math.Round(wp.Top[0].P, 4) : null, WorldHit = hit } };
                     Coarse.Observe(before, action, hit, surp);
                 }

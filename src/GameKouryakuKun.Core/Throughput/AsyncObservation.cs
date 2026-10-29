@@ -35,6 +35,12 @@ public sealed class ObservationLedger
     private readonly Dictionary<(int Step, string Sensor), Entry> _open = new();
     private readonly List<SensorResult> _resolved = new();
     private int _currentStep = int.MinValue;
+    private readonly Dictionary<int, (int Open, int Ok, int Bad)> _perStep = new();   // v0.40.1: 手ごとの観測器の状態（因果保持は手の数で数える）
+    private void Track(int step, int open, int ok, int bad)
+    {
+        var c = _perStep.GetValueOrDefault(step);
+        _perStep[step] = (c.Open + open, c.Ok + ok, c.Bad + bad);
+    }
 
     public long Opened, Observed, Inherited, LateAmended, Missing, Violations, DecidedWithPending;
 
@@ -55,9 +61,9 @@ public sealed class ObservationLedger
     {
         lock (_lock)
         {
-            if (_open.ContainsKey((step, sensor))) Violations++;   // 同じ手・同じ観測器を二重に開いた（前の結果の対応を壊す）
+            if (_open.ContainsKey((step, sensor))) { Violations++; Track(step, 0, 0, 1); }   // 同じ手・同じ観測器を二重に開いた（前の結果の対応を壊す）
             _open[(step, sensor)] = new Entry { FrameId = frameId, CaptureMs = captureMs, Seq = seq, Position = pos, OpenedMs = nowMs };
-            Opened++;
+            Opened++; Track(step, 1, 0, 0);
         }
     }
 
@@ -71,8 +77,8 @@ public sealed class ObservationLedger
     {
         lock (_lock)
         {
-            if (!_open.TryGetValue((step, sensor), out var e) || e.FrameId != frameId || e.Seq != seq) { Violations++; return null; }
-            _open.Remove((step, sensor));
+            if (!_open.TryGetValue((step, sensor), out var e) || e.FrameId != frameId || e.Seq != seq) { Violations++; Track(step, 0, 0, 1); return null; }
+            _open.Remove((step, sensor)); Track(step, -1, 1, 0);
             var prov = _currentStep > step ? SensorProvenance.Late : inherited ? SensorProvenance.Inherited : SensorProvenance.Observed;
             if (prov == SensorProvenance.Late) LateAmended++; else if (prov == SensorProvenance.Inherited) Inherited++; else Observed++;
             var r = new SensorResult(e.FrameId, e.CaptureMs, step, e.Seq, e.Position, sensor, startMs, finishMs, prov, detail);
@@ -86,8 +92,8 @@ public sealed class ObservationLedger
     {
         lock (_lock)
         {
-            if (!_open.Remove((step, sensor), out var e)) { Violations++; return null; }
-            Missing++;
+            if (!_open.Remove((step, sensor), out var e)) { Violations++; Track(step, 0, 0, 1); return null; }
+            Missing++; Track(step, -1, 0, 1);
             var r = new SensorResult(e.FrameId, e.CaptureMs, step, e.Seq, e.Position, sensor, e.OpenedMs, nowMs, SensorProvenance.Missing, reason);
             _resolved.Add(r);
             return r;
@@ -106,8 +112,14 @@ public sealed class ObservationLedger
         lock (_lock) return _resolved.OrderBy(r => r.CaptureMs).ThenBy(r => r.Step).ThenBy(r => r.Sensor, StringComparer.Ordinal).ToList();
     }
 
-    /// <summary>因果を保った観測（observed/inherited/late のうち違反のないもの）の数</summary>
-    public long CausallyIntact { get { lock (_lock) return Observed + Inherited + LateAmended; } }
+    /// <summary>因果を保った観測器の結果（observed/inherited/late）の数（観測器の数だけ数える）</summary>
+    public long CausallyIntactResults { get { lock (_lock) return Observed + Inherited + LateAmended; } }
+
+    /// <summary>
+    /// 因果を保った観測の数＝手の数（v0.40.1）。その手のすべての観測器の結果が合流し（未完なし）、missing・対応違反が 1 つもない手。
+    /// v0.40.0 は観測器の結果の数を数えていたため、観測器が 4 つの設定 D で手の約 4 倍に膨らんでいた（実機 2026-10-29）。
+    /// </summary>
+    public long CausallyIntact { get { lock (_lock) return _perStep.Count(k => k.Value.Open == 0 && k.Value.Bad == 0 && k.Value.Ok > 0); } }
 
     /// <summary>late-amend 成功率: late で合流できた / (late + 未解決)。late も未解決もなければ 1</summary>
     public double LateAmendSuccessRate()

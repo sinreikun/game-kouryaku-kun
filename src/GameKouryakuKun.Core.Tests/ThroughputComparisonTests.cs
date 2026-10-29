@@ -101,4 +101,49 @@ public class ThroughputComparisonTests : IDisposable
         Assert.Contains("\"defaults_changed\": false", js);
         Assert.Contains("cio_per_min", js);
     }
+
+    private static Dictionary<string, (long, long)> W(params (string, long, long)[] xs) => xs.ToDictionary(x => x.Item1, x => (x.Item2, x.Item3));
+
+    [Fact]
+    public void Screen_mix_difference_is_not_a_prediction_regression()
+    {
+        // 実機 2026-10-29: B は易しい画面と難しい画面を半々に訪れ、全体の当たりは 79%（A 88%）。同じ画面どうしでは同じ
+        var a = S("A", 1, 45) with { WorldChecked = 100, WorldHits = 88, WorldPSum = 88, WorldByNode = W(("easy", 80, 76), ("hard", 20, 12)) };
+        var b = S("B", 1, 90) with { WorldChecked = 200, WorldHits = 158, WorldPSum = 158, WorldByNode = W(("easy", 100, 95), ("hard", 100, 63)) };
+        Assert.True(b.WorldHitRate < a.WorldHitRate - 0.05);
+        Assert.DoesNotContain(ThroughputComparison.Regressions(b, a), r => r.StartsWith("Prediction"));
+    }
+
+    [Fact]
+    public void Same_screen_prediction_drop_is_a_regression()
+    {
+        var a = S("A", 1, 45) with { WorldChecked = 200, WorldHits = 180, WorldPSum = 180, WorldByNode = W(("s", 200, 180)) };
+        var b = S("B", 1, 90) with { WorldChecked = 200, WorldHits = 120, WorldPSum = 120, WorldByNode = W(("s", 200, 120)) };
+        Assert.Contains(ThroughputComparison.Regressions(b, a), r => r.Contains("同じ画面どうし"));
+    }
+
+    [Fact]
+    public void Calibration_gap_regression()
+    {
+        var a = S("A", 1, 45) with { WorldChecked = 100, WorldHits = 80, WorldPSum = 82 };
+        var b = S("B", 1, 90) with { WorldChecked = 100, WorldHits = 50, WorldPSum = 90 };
+        Assert.Contains(ThroughputComparison.Regressions(b, a), r => r.Contains("較正のずれ"));
+    }
+
+    [Fact]
+    public void Causally_intact_counts_actions_not_sensor_results()
+    {
+        // 実機 2026-10-29: 観測器 4 つの D で因果保持観測/分が手/分の約 4 倍になっていた
+        var l = new ObservationLedger();
+        foreach (var step in new[] { 1, 2 })
+        {
+            l.BeginAction(step);
+            foreach (var sn in new[] { "ocr", "frame_diff", "noise", "noise_gap" }) l.Open(step, step, sn, step, 0, FramePosition.Settle, 0);
+            foreach (var sn in new[] { "ocr", "frame_diff", "noise", "noise_gap" }) l.Complete(step, sn, step, step, 0, 1);
+        }
+        l.BeginAction(3); l.Open(3, 3, "ocr", 3, 0, FramePosition.Settle, 0); l.Open(3, 3, "noise", 3, 0, FramePosition.Settle, 0);
+        l.Complete(3, "ocr", 3, 3, 0, 1); l.Fail(3, "noise", 1, "x");   // missing を含む手は因果保持に数えない
+        Assert.Equal(2, l.CausallyIntact);
+        Assert.Equal(9, l.CausallyIntactResults);
+    }
 }
