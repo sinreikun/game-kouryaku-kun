@@ -1,0 +1,121 @@
+namespace GameKouryakuKun.Core.Throughput;
+
+/// <summary>Action に対するフレームの位置（docs/throughput-parallel-sensing-design.md §7.1）</summary>
+public enum FramePosition { Pre, Post, Settle, Gap }
+
+/// <summary>観測の出どころ。missing は「一度も作られなかった」ものだけ（deadline 超過は late）</summary>
+public enum SensorProvenance { Observed, Inherited, Pending, Late, Missing }
+
+/// <summary>
+/// すべての観測器の結果が持つ必須項目（C1）。帰属は CaptureMs と Step/Seq/FrameId。FinishMs は遅延の計測だけに使う。
+/// </summary>
+public sealed record SensorResult(
+    long FrameId, double CaptureMs, int Step, long Seq, FramePosition Position, string Sensor,
+    double StartMs, double FinishMs, SensorProvenance Provenance, string? Detail = null)
+{
+    public double LatencyMs => FinishMs - StartMs;
+    public static string Name(FramePosition p) => p.ToString().ToLowerInvariant();
+    public static string Name(SensorProvenance p) => p.ToString().ToLowerInvariant();
+}
+
+/// <summary>
+/// 非同期 Observation の台帳（C1）。Action 時点で (step, sensor) を pending として開き、結果が届いたら元の手に合流させる。
+/// 開いた時の frame/seq と結果の frame/seq が違えば対応違反（Action→Observation→Result の対応を壊した＝Health FAIL）。
+/// 結果が届いた時点で、より後の手が既に始まっていれば late（追補）。届かずに終わったものは drain 後 pending_unresolved。
+/// スレッド安全（観測器のスレッドから Complete が呼ばれる）。
+/// </summary>
+public sealed class ObservationLedger
+{
+    private sealed class Entry
+    {
+        public long FrameId; public double CaptureMs; public long Seq; public FramePosition Position; public double OpenedMs;
+        public SensorResult? Result;
+    }
+    private readonly object _lock = new();
+    private readonly Dictionary<(int Step, string Sensor), Entry> _open = new();
+    private readonly List<SensorResult> _resolved = new();
+    private int _currentStep = int.MinValue;
+
+    public long Opened, Observed, Inherited, LateAmended, Missing, Violations, DecidedWithPending;
+
+    /// <summary>手 step の入力を始める（これより前の手の未完の観測は、以後届いたら late）</summary>
+    public void BeginAction(int step)
+    {
+        lock (_lock)
+        {
+            _currentStep = step;
+            if (_open.Keys.Any(k => k.Step < step)) DecidedWithPending++;
+        }
+    }
+
+    public int CurrentStep { get { lock (_lock) return _currentStep; } }
+
+    /// <summary>手 step の観測器 sensor の結果を pending として開く</summary>
+    public void Open(int step, long seq, string sensor, long frameId, double captureMs, FramePosition pos, double nowMs)
+    {
+        lock (_lock)
+        {
+            _open[(step, sensor)] = new Entry { FrameId = frameId, CaptureMs = captureMs, Seq = seq, Position = pos, OpenedMs = nowMs };
+            Opened++;
+        }
+    }
+
+    public int PendingCount { get { lock (_lock) return _open.Count; } }
+
+    /// <summary>
+    /// 結果を合流させる。開いた手と frame/seq が一致しなければ対応違反として記録し、結果は合流させない（別の手に混ぜない）。
+    /// 返り値: 確定した provenance を持つ結果（違反なら null）
+    /// </summary>
+    public SensorResult? Complete(int step, string sensor, long frameId, long seq, double startMs, double finishMs, bool inherited = false, string? detail = null)
+    {
+        lock (_lock)
+        {
+            if (!_open.TryGetValue((step, sensor), out var e) || e.FrameId != frameId || e.Seq != seq) { Violations++; return null; }
+            _open.Remove((step, sensor));
+            var prov = _currentStep > step ? SensorProvenance.Late : inherited ? SensorProvenance.Inherited : SensorProvenance.Observed;
+            if (prov == SensorProvenance.Late) LateAmended++; else if (prov == SensorProvenance.Inherited) Inherited++; else Observed++;
+            var r = new SensorResult(e.FrameId, e.CaptureMs, step, e.Seq, e.Position, sensor, startMs, finishMs, prov, detail);
+            _resolved.Add(r);
+            return r;
+        }
+    }
+
+    /// <summary>観測器が結果を作れなかった（例外など）。一度も作られなかったものだけ missing</summary>
+    public SensorResult? Fail(int step, string sensor, double nowMs, string reason)
+    {
+        lock (_lock)
+        {
+            if (!_open.Remove((step, sensor), out var e)) { Violations++; return null; }
+            Missing++;
+            var r = new SensorResult(e.FrameId, e.CaptureMs, step, e.Seq, e.Position, sensor, e.OpenedMs, nowMs, SensorProvenance.Missing, reason);
+            _resolved.Add(r);
+            return r;
+        }
+    }
+
+    /// <summary>drain 後もまだ開いているもの（未解決）。実行終了時に呼ぶ</summary>
+    public IReadOnlyList<(int Step, string Sensor, long FrameId)> Unresolved()
+    {
+        lock (_lock) return _open.Select(k => (k.Key.Step, k.Key.Sensor, k.Value.FrameId)).ToList();
+    }
+
+    /// <summary>取得時刻順（完了順ではない）に並べた合流済みの結果</summary>
+    public IReadOnlyList<SensorResult> Timeline()
+    {
+        lock (_lock) return _resolved.OrderBy(r => r.CaptureMs).ThenBy(r => r.Step).ThenBy(r => r.Sensor, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>因果を保った観測（observed/inherited/late のうち違反のないもの）の数</summary>
+    public long CausallyIntact { get { lock (_lock) return Observed + Inherited + LateAmended; } }
+
+    /// <summary>late-amend 成功率: late で合流できた / (late + 未解決)。late も未解決もなければ 1</summary>
+    public double LateAmendSuccessRate()
+    {
+        lock (_lock)
+        {
+            long un = _open.Count(k => k.Key.Step < _currentStep);
+            long d = LateAmended + un;
+            return d == 0 ? 1 : (double)LateAmended / d;
+        }
+    }
+}

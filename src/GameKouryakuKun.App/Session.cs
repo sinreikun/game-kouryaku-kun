@@ -681,6 +681,8 @@ public sealed class PlaySession
         _env.Log.Write("throughput_flags", ("status", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
         var stepTiming = GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming ? new GameKouryakuKun.Core.Throughput.StepTiming() : null;   // T0
         StepTimingRef = stepTiming;
+        Ledger = GameKouryakuKun.Core.Throughput.ThroughputFlags.LedgerActive ? new GameKouryakuKun.Core.Throughput.ObservationLedger() : null;   // T1/T5: 非同期 Observation 契約
+        _pendingObs = null; RawCommitted = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）
         var background = new BackgroundActivityBook();
         var motion = new MotionMaskBook();
@@ -1010,6 +1012,7 @@ public sealed class PlaySession
             // 待つ手（中立の観測）はキーを送らない。入力の直後と同じ判定で、何もしないと画面がどうなるかを見る
             bool waiting = ca.IsWait;
             if (stepTiming != null) { double tst = MonoClock.Now; stepTiming.Mark("decide", tst); stepTiming.SendStarted(tst); }
+            Ledger?.BeginAction(step); _actionsSent++;
             var receipt = waiting ? new InputReceipt(true, "none", "wait", MonoClock.Now, MonoClock.Now, 0, "キーを送らずに待つ") : active.Send(action);
             stepTiming?.Mark("send", MonoClock.Now);
             // A（送達）: OS・入力方式として送れたか。続けて失敗したらシステムの失敗として止める
@@ -1076,7 +1079,7 @@ public sealed class PlaySession
                     new OutcomeRecord(b.NetChange, KindId(b.Kind), b.BoundaryMs,
                         Json.Obj(("first_change_ms", b.FirstChangeMs), ("settled_ms", b.SettledMs), ("frames", b.FramesSeen), ("note", b.Note),
                             ("peak_ratio", b.PeakFromBaseline?.ChangedRatio), ("final_ratio", b.FinalFromBaseline?.ChangedRatio), ("input_backend", receipt.BackendId)))));
-                turnId = ids.TurnId; dbErrors = 0;
+                turnId = ids.TurnId; dbErrors = 0; RawCommitted++;
             }
             catch (Exception e)
             {
@@ -1179,8 +1182,13 @@ public sealed class PlaySession
             goals.Tick(choice.Rule == "goal" || (goalComposite && choice.Rule == "sequence_step"));
             // v0.27.2: 毎手の文字の観測（手の流れを止めない。届いた時から状態の見方・観測に入る）
             // v0.29.0: この手の観測（文字を含む）を作り終えてから次の手を決める（1 手 = 1 完全な観測）
-            ReadTextEachStep(step, curNode, ca.Name, ca.IsWait || isHuman ? (ca.IsWait ? "wait" : "human") : "agent", node2, after, b.BoundaryMs,
-                st.Seq, "v" + vis2, changedNow, natural.Rates(curNode)?.Change).GetAwaiter().GetResult();
+            // v0.39.1（T1・GKK_PIPELINE_SENSING）: 前の手の観測の完成は、この手の観測を始める前に必ず待つ（文字の差分の順序を保つ）。
+            // この手の観測は待たずに次の手へ進む（pending。完成したら元の step/seq/frame に合流＝late-amend。§7 C1）
+            if (_pendingObs != null) { _pendingObs.GetAwaiter().GetResult(); _pendingObs = null; }
+            var obsTask = ReadTextEachStep(step, curNode, ca.Name, ca.IsWait || isHuman ? (ca.IsWait ? "wait" : "human") : "agent", node2, after, b.BoundaryMs,
+                st.Seq, "v" + vis2, changedNow, natural.Rates(curNode)?.Change);
+            if (GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing) _pendingObs = obsTask;
+            else obsTask.GetAwaiter().GetResult();
             stepTiming?.Mark("obs_wait", MonoClock.Now);
             // v0.33.3 dual-append: 旧 memory 学習はそのまま。フラグ ON のときだけ vNext へ併記（失敗しても探索は続ける）
             TryDualAppendVNext(st, ca, source, curNode, node2, changedNow, so, check, prediction);
@@ -1339,6 +1347,16 @@ public sealed class PlaySession
             Changed?.Invoke();
         }
         foreach (var bk in _inputs) bk.ReleaseAll();
+        if (_pendingObs != null) { try { _pendingObs.GetAwaiter().GetResult(); } catch (Exception e) { _env.Log.Write("observation_failed", ("step", Step), ("error", e.Message)); } _pendingObs = null; }   // drain（§7.2-4）
+        if (Ledger != null)
+        {
+            var un = Ledger.Unresolved();
+            var m = CurrentThroughput();
+            _env.Log.Write("ledger_summary", ("opened", Ledger.Opened), ("observed", Ledger.Observed), ("inherited", Ledger.Inherited), ("late", Ledger.LateAmended),
+                ("missing", Ledger.Missing), ("violations", Ledger.Violations), ("unresolved", un.Count), ("decided_with_pending", Ledger.DecidedWithPending),
+                ("late_amend_success", Math.Round(m.LateAmendSuccessRate, 4)), ("cio_per_min", Math.Round(m.CausalObservationsPerMinute, 1)), ("actions_per_min", Math.Round(m.ActionsPerMinute, 1)),
+                ("raw_retention", Math.Round(m.RawRetentionRatio, 4)), ("metrics", m.Summary()));
+        }
         if (stepTiming != null && stepTiming.Steps > 0)
             _env.Log.Write("step_timing_summary", ("steps", stepTiming.Steps), ("actions_per_min", Math.Round(stepTiming.ActionsPerMinute(), 1)),
                 ("coverage", Math.Round(stepTiming.CoverageRatio(), 3)), ("median", string.Join(" ", stepTiming.MedianByPhase().Select(k => $"{k.Key}:{k.Value}"))));
@@ -1703,13 +1721,17 @@ public sealed class PlaySession
         var chain = _o.Ocr;
         if (frame == null) return Task.CompletedTask;
         var prev = _textLast; long prevStep = _textLastStep;
+        var worldPred = _lastWorldPred;   // v0.39.1: 観測を始めた時点の世界予測（後の手の予測で上書きされても、この観測は自分の手の予測と比べる）
+        var ledger = Ledger; double obsStart = MonoClock.Now;
+        ledger?.Open(step, seq, "ocr", frame.Id, frame.TimestampMs, GameKouryakuKun.Core.Throughput.FramePosition.Settle, obsStart);
         if (chain == null)
         {
             // OCR がなくても、画素の区画と大域の層は毎手作る（文字は not_observed）
             var cells = _textReader.StableCells(frame);
             var noText = new GameKouryakuKun.Core.Ocr.TextSnapshot(frame.Id, frame.Width, frame.Height, Array.Empty<GameKouryakuKun.Core.Ocr.OcrLine>(), cells);
-            EmitObservation(step, seq, before, action, source, after, visState, prev, null, "none", null, null, 0, ChangedCells(prev, noText), boundaryMs, changedNow, naturalChange, null, frame);
+            EmitObservation(step, seq, before, action, source, after, visState, prev, null, "none", null, null, 0, ChangedCells(prev, noText), boundaryMs, changedNow, naturalChange, null, frame, worldPred);
             _textLast = noText; _textLastStep = step;
+            if (ledger != null) LogSensor(ledger.Complete(step, "ocr", frame.Id, seq, obsStart, MonoClock.Now, inherited: false, detail: "no_engine"));
             return Task.CompletedTask;
         }
         Interlocked.Increment(ref Ocr2.Requested);
@@ -1803,15 +1825,39 @@ public sealed class PlaySession
                 try
                 {
                     if (snapOut == null) { var cells = _textReader.StableCells(frame); pixOut = ChangedCells(prev, new GameKouryakuKun.Core.Ocr.TextSnapshot(frame.Id, frame.Width, frame.Height, Array.Empty<GameKouryakuKun.Core.Ocr.OcrLine>(), cells)); }
-                    EmitObservation(step, seq, before, action, source, after, visState, prev, snapOut, kindOut, boxOut, diffOut, causedOut, pixOut ?? ChangedCells(prev, snapOut!), boundaryMs, changedNow, naturalChange, fgOut, frame);
+                    EmitObservation(step, seq, before, action, source, after, visState, prev, snapOut, kindOut, boxOut, diffOut, causedOut, pixOut ?? ChangedCells(prev, snapOut!), boundaryMs, changedNow, naturalChange, fgOut, frame, worldPred);
+                    if (ledger != null)
+                        LogSensor(snapOut != null
+                            ? ledger.Complete(step, "ocr", frame.Id, seq, obsStart, MonoClock.Now, inherited: kindOut is not ("full" or "region"), detail: kindOut)
+                            : ledger.Fail(step, "ocr", MonoClock.Now, "ocr_failed"));
                 }
-                catch (Exception e) { _env.Log.Write("observation_failed", ("step", step), ("error", e.Message)); }
+                catch (Exception e)
+                {
+                    _env.Log.Write("observation_failed", ("step", step), ("error", e.Message));
+                    if (ledger != null && ledger.Unresolved().Any(u => u.Step == step && u.Sensor == "ocr")) LogSensor(ledger.Fail(step, "ocr", MonoClock.Now, "observation_failed"));
+                }
                 Interlocked.Exchange(ref _ocrStepBusy, 0); Interlocked.Exchange(ref _ocrBusy, 0);
             }
         });
     }
     private readonly HashSet<string> _boundaryStates = new(StringComparer.Ordinal);
     public GameKouryakuKun.Core.Throughput.StepTiming? StepTimingRef { get; private set; }
+    public GameKouryakuKun.Core.Throughput.ObservationLedger? Ledger { get; private set; }
+    private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
+    public long RawCommitted;
+    public long RawExtraRows;   // T4: Raw ストアの行（memory の turn 行に加えて）
+    public GameKouryakuKun.Core.Throughput.ThroughputMetrics CurrentThroughput()
+    {
+        var l = Ledger;
+        return new GameKouryakuKun.Core.Throughput.ThroughputMetrics((MonoClock.Now - _runStartMs) / 60000.0, _actionsSent, l?.CausallyIntact ?? 0, l?.Violations ?? 0,
+            l?.LateAmended ?? 0, l?.Unresolved().Count ?? 0, l?.Missing ?? 0, RawCommitted, l?.DecidedWithPending ?? 0);
+    }
+    private void LogSensor(GameKouryakuKun.Core.Throughput.SensorResult? r)
+    {
+        if (r == null) return;
+        _env.Log.Write("sensor_result", ("step", r.Step), ("seq", r.Seq), ("frame_id", r.FrameId), ("capture_ms", Math.Round(r.CaptureMs, 1)), ("position", GameKouryakuKun.Core.Throughput.SensorResult.Name(r.Position)),
+            ("sensor", r.Sensor), ("start_ms", Math.Round(r.StartMs, 1)), ("finish_ms", Math.Round(r.FinishMs, 1)), ("provenance", GameKouryakuKun.Core.Throughput.SensorResult.Name(r.Provenance)), ("detail", r.Detail));
+    }
     public GameKouryakuKun.Core.Observation.ObservationBuilder ObsBuilder { get; } = new();
     public long ObsSaved, ObsFailed, ObsTextNotObserved;
     public GameKouryakuKun.Core.Observation.EntityTracker Entities { get; } = new();
@@ -1835,7 +1881,8 @@ public sealed class PlaySession
     /// <summary>v0.29.0: 1 手の構造化した観測を作って DB とログに残す（意味は付けない）</summary>
     private void EmitObservation(int step, long seq, string before, string action, string source, string after, string? visState,
         GameKouryakuKun.Core.Ocr.TextSnapshot? prev, GameKouryakuKun.Core.Ocr.TextSnapshot? snap, string readKind, GameKouryakuKun.Core.Ocr.OcrBox? box, GameKouryakuKun.Core.Ocr.TextDiff? diff, double caused,
-        List<int> pix, double boundaryMs, bool changedNow, double? naturalChange, ulong? fg, GameKouryakuKun.Core.Imaging.Frame frame)
+        List<int> pix, double boundaryMs, bool changedNow, double? naturalChange, ulong? fg, GameKouryakuKun.Core.Imaging.Frame frame,
+        GameKouryakuKun.Core.Exploration.PredictedOutcome? worldPred = null)
     {
         GameKouryakuKun.Core.Observation.StructuredObservation o;
         lock (ObsBuilder)
@@ -1881,7 +1928,7 @@ public sealed class PlaySession
                 double[] surp = ent.Status == GameKouryakuKun.Core.Observation.LayerStatus.Observed ? LocalEvents.Observe(before, action, o.Provenance == "wait", evs, ent, lctx) : Array.Empty<double>();
                 o = o with { EntityLayer = ent, Prediction = new GameKouryakuKun.Core.Observation.PredictionObs(pr == null ? GameKouryakuKun.Core.Observation.LayerStatus.NotObserved : GameKouryakuKun.Core.Observation.LayerStatus.Observed,
                     pr?.P.Select(x => Math.Round(x, 4)).ToArray(), evs, surp.Select(x => Math.Round(x, 4)).ToArray(), pr?.Move is { } m ? new[] { m.Dx, m.Dy } : null) };
-                if (_lastWorldPred is { } wp && wp.Node == before && wp.Action == action && o.Prediction != null)
+                if ((worldPred ?? _lastWorldPred) is { } wp && wp.Node == before && wp.Action == action && o.Prediction != null)
                 {
                     bool hit = wp.TopNext == after;
                     o = o with { Prediction = o.Prediction with { WorldNext = wp.TopNext, WorldP = wp.Top.Count > 0 ? Math.Round(wp.Top[0].P, 4) : null, WorldHit = hit } };
