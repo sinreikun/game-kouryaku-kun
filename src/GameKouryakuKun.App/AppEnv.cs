@@ -192,6 +192,8 @@ public sealed class AppEnv : IDisposable
         {
             var vpath = ExperienceVNextStore.DefaultPath(ProfileDataDir);
             if (File.Exists(vpath)) files.Add(("experience-vnext.sqlite", vpath));
+            var rapath = RawAggStore.DefaultPath(ProfileDataDir);
+            if (File.Exists(rapath)) files.Add((RawAggStore.FileName, rapath));
             var ipath = IntrinsicStatsStore.DefaultPath(ProfileDataDir);
             if (File.Exists(ipath)) files.Add(("intrinsic-stats.sqlite", ipath));
             var rpath = ModelRegistryStore.DefaultPath(ProfileDataDir);

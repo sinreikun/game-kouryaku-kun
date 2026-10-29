@@ -939,6 +939,45 @@ INSERT OR REPLACE INTO pe_schema_meta(key, value) VALUES('contract', 's3-causal-
     // ============================================================
     // intrinsic-stats.sqlite（S5: 寄与統計。memory.sqlite 非変更）
     // ============================================================
+    // experience-raw-agg.sqlite（v0.39.4 T4 / C2: Raw は append-only、集約は表現の版ごと。memory.sqlite 非変更）
+    public const string RawAggMetaTable = "rawagg_schema_meta";
+    public static readonly IReadOnlyList<Migration> RawAgg = new[]
+    {
+        new Migration(1, "T4 Raw Experience (append-only) + Aggregated Index（docs/throughput-parallel-sensing-design.md §4・§8）", """
+CREATE TABLE rawagg_schema_meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE raw_experience(
+  id INTEGER PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  step INTEGER NOT NULL,
+  memory_turn_id INTEGER,
+  frame_id INTEGER NOT NULL,
+  capture_ms REAL NOT NULL,
+  node_before TEXT NOT NULL,
+  action TEXT NOT NULL,
+  node_after TEXT,
+  net_change INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  rep_version INTEGER NOT NULL,
+  tier TEXT NOT NULL
+);
+CREATE INDEX ix_raw_seq ON raw_experience(seq);
+CREATE TRIGGER raw_no_update BEFORE UPDATE ON raw_experience BEGIN SELECT RAISE(ABORT, 'raw_experience is append-only'); END;
+CREATE TRIGGER raw_no_delete BEFORE DELETE ON raw_experience BEGIN SELECT RAISE(ABORT, 'raw_experience is append-only'); END;
+CREATE TABLE agg_index(
+  rep_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  action TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  first_seq INTEGER NOT NULL,
+  last_seq INTEGER NOT NULL,
+  PRIMARY KEY(rep_version, state, action, outcome)
+);
+INSERT OR REPLACE INTO rawagg_schema_meta(key, value) VALUES('contract', 'throughput-c2-raw-aggregate');
+"""),
+    };
+
     public const string IntrinsicStatsMetaTable = "intrinsic_schema_meta";
     public static readonly IReadOnlyList<Migration> IntrinsicStats = new[]
     {

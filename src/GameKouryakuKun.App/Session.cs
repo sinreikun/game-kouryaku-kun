@@ -414,6 +414,8 @@ public sealed class PlaySession
             _peStore = null;
             try { _intrinsicStore?.Dispose(); } catch { }
             _intrinsicStore = null;
+            try { _rawAgg?.Dispose(); } catch { }
+            _rawAgg = null;
             try { FlushOuterRegistry("session_end"); } catch { }
             try { _modelRegistry?.Dispose(); } catch { }
             _modelRegistry = null;
@@ -685,7 +687,7 @@ public sealed class PlaySession
         var settleAdapt = GameKouryakuKun.Core.Throughput.ThroughputFlags.AdaptiveSettle ? new GameKouryakuKun.Core.Throughput.AdaptiveSettle() : null;   // T2
         string? prevSettleKey = null; double prevSettleUsed = 0; bool prevSettleShort = false;
         NoiseModel = GameKouryakuKun.Core.Throughput.ThroughputFlags.NaturalNoise ? new GameKouryakuKun.Core.Throughput.NaturalNoiseModel() : null;   // T3（注釈のみ）
-        _pendingObs = null; RawCommitted = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
+        _pendingObs = null; RawCommitted = 0; RawExtraRows = 0; RawDuplicates = 0; RawAggErrors = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）
         var background = new BackgroundActivityBook();
         var motion = new MotionMaskBook();
@@ -1104,6 +1106,20 @@ public sealed class PlaySession
                 Emit("memory.sqlite への記録に失敗: " + e.Message, LogLevel.Error);
                 if (++dbErrors >= 3) { StopReason = "記録の失敗が3回続いたため中止"; endReason = "abort"; }
             }
+            if (GameKouryakuKun.Core.Throughput.ThroughputFlags.RawAggSplit && turnId != null && b.Kind != TurnKind.Aborted && node2 != null)
+            {
+                // T4 / C2: Raw は潰さず 1 手 1 行（memory の turn 行への参照と静止判定の根拠）。集約は現在の表現で別に数える
+                try
+                {
+                    _rawAgg ??= RawAggStore.Open(_env.ProfileDataDir, AppEnv.Version);
+                    var fr = after ?? baseline;
+                    bool dup = _rawAgg.Append(new GameKouryakuKun.Core.Throughput.RawExperience(nextSeq, step, turnId, fr.Id, fr.TimestampMs, curNode, ca.Name, node2, b.NetChange, KindId(b.Kind),
+                        Json.Obj(("baseline_frame_id", baseline.Id), ("boundary_ms", b.BoundaryMs), ("first_change_ms", b.FirstChangeMs), ("settled_ms", b.SettledMs), ("frames", b.FramesSeen),
+                            ("peak_ratio", b.PeakFromBaseline?.ChangedRatio), ("final_ratio", b.FinalFromBaseline?.ChangedRatio), ("source", source), ("input_backend", receipt.BackendId))));
+                    RawExtraRows++; if (dup) RawDuplicates++;
+                }
+                catch (Exception e) { RawAggErrors++; _env.Log.Write("raw_agg_failed", ("step", step), ("error", e.Message)); }
+            }
             stepTiming?.Mark("commit", MonoClock.Now);
             if (NoiseModel != null && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
                 ObserveNoise(motionKey, baseline, after, detOpt.Diff, step, GameKouryakuKun.Core.Throughput.FramePosition.Settle, natural: waiting);
@@ -1367,6 +1383,13 @@ public sealed class PlaySession
             Changed?.Invoke();
         }
         foreach (var bk in _inputs) bk.ReleaseAll();
+        if (_rawAgg != null)
+        {
+            bool ok; try { ok = _rawAgg.VerifyReplay(); } catch { ok = false; }
+            _env.Log.Write("raw_agg_summary", ("raw", _rawAgg.RawCount()), ("agg", _rawAgg.Index.Keys), ("run_raw", RawExtraRows), ("run_dup", RawDuplicates),
+                ("dup_ratio", Math.Round(_rawAgg.Index.DuplicateRatio, 4)), ("retention", RawExtraRows + RawAggErrors == 0 ? 1 : Math.Round((double)RawExtraRows / (RawExtraRows + RawAggErrors), 4)),
+                ("errors", RawAggErrors), ("replay_ok", ok.ToString()));
+        }
         if (NoiseModel != null) _env.Log.Write("noise_summary", ("summary", NoiseModel.Summary()), ("screens_with_baseline", NoiseModel.ScreensWithBaseline), ("screens", NoiseModel.Screens),
             ("natural", NoiseModel.NaturalCandidates), ("input", NoiseModel.InputCandidates), ("no_baseline", NoiseModel.NoBaseline));
         if (settleAdapt != null)
@@ -1892,7 +1915,8 @@ public sealed class PlaySession
         }
         catch (Exception e) { _env.Log.Write("noise_failed", ("step", step), ("error", e.Message)); }
     }
-    public long RawExtraRows;   // T4: Raw ストアの行（memory の turn 行に加えて）
+    public long RawExtraRows, RawDuplicates, RawAggErrors;   // T4: Raw ストアの行（memory の turn 行に加えて）
+    private RawAggStore? _rawAgg;
     public GameKouryakuKun.Core.Throughput.ThroughputMetrics CurrentThroughput()
     {
         var l = Ledger;
