@@ -1,7 +1,8 @@
 # 高速経験収集・入力無関係変化の分離・重複回避・並列観測器 設計（案）
 
 - 起点: ユーザー指示 t117u（2026-10-29）
-- 対象版: v0.38.0（実装なし・Release なし。本書と計測のみ）
+- 対象版: v0.38.0 で計測 → v0.39.0〜v0.39.5 で T0〜T5 を実装（すべてフラグ既定 OFF）
+- 改訂: t118u（2026-10-29）で必須条件 C1（非同期でも因果系列を失わない）・C2（重複削減と Raw の再解釈可能性の分離）を追加。§2.2・§4・§5・§6 を改訂し §7〜§9 を追加
 - 計測元: real-machine-archive/v0.38.0-20261028（app-20261028-212635.jsonl, health.txt）探索 #159
 
 ## 0. 守る原則（変更しない）
@@ -41,12 +42,13 @@ Health「読み取り中の手 0」= OCR は**毎手直列で完了を待って�
   - 後から変化（`late_change` 7 件）が観測されたら、その画面の待ちを即座に戻す（安全側に自己修正）。late_change 率を Health に出し WARN 判定。
 - 期待: 静止待ち 604 → 約 300–400 ms。
 
-### 2.2 パイプライン化（解析と次の決定の重ね合わせ）
-- 静止確定フレームを不変スナップショットとして確保 → OCR/GT/Entity を非同期に開始。
-- 次の手の決定は「確定済みの観測」で行う。OCR 等が未完の場合は **その特徴は欠損（unknown）として扱い、推測で埋めない**。後着した結果は元の turn_id にタイムスタンプ付きで紐づけて記録（後から因果を付け替えない・時間順序は保持）。
-- 安全弁: 文字が画面の大部分を占め、前回と layout_hash が異なる場合等、決定に効く欠損が多いときは待つ（deadline 内）。待った/待たなかったは Health に既存の「読み取り中の手」項目で比較（1.25 倍 WARN を流用）。
-- 期待: OCR 473 ms のうち大半を静止待ち・入力と重ねられる。
-
+### 2.2 パイプライン化（非同期 Observation 契約。§7 C1 に従う）
+- 静止確定フレームを不変スナップショットとして確保 → OCR を非同期に開始し、**完了を待たずに次の手の決定・入力・静止待ちへ進む**。
+- 次の手の時点で前の手の OCR が未完なら、その手の観測は **pending**（欠損ではない）。決定は確定済みの層で行い、`decided_with_pending` として数える。
+- OCR が後の手の実行後に完了しても、結果は **元の Frame ID・Action（seq / step）・取得時刻** に紐づけて元の時間軸へ合流（late-amend）。因果推定・予測誤差は**取得時刻**に帰属し、完了時刻には帰属しない。
+- 前の手の観測の完成は、次の手の OCR を始める前に必ず待つ（前後の文字の差分の順序を保つ）。実行の終わりにも必ず回収（drain）。
+- ~~「未完は unknown として扱い、推測で埋めない」~~ → **pending→late-amend に置き換え**（t118u）。deadline 超過は pending/late。一度も作られなかったものだけ missing。
+- 世界予測（`_lastWorldPred`）は観測を開始した時点の値を観測に渡す（後の手の予測で上書きされて予測誤差の対応が壊れないように）。
 ### 2.3 目標
 直列合計 ~1280 ms → 約 650–800 ms、**75–90 手/分**（1.7–2 倍）。
 
@@ -59,27 +61,69 @@ Health「読み取り中の手 0」= OCR は**毎手直列で完了を待って�
 - 基準不足の解消: 待つ手を「基準が無い画面」で優先する（固定確率で増やさず、既存の情報価値で）。6/10 → 目標 ≥9/10。
 - しきい値（GT・Track）は変えない。分離は新しい層で前段に足すだけ。
 
-## 4. 重複回避（状態シグネチャ＋保存は一度・回数を数える）
-- 状態シグネチャ: 既存 node（m43|…）＋ 自然変化を除いたセル量子化ハッシュ＋ OCR layout_hash の組。知覚ハッシュで画素揺れに頑健に。
-- 保存: 同じ (シグネチャ, 手, 結果シグネチャ) は **本体を一度だけ保存し count・最終時刻・結果分布を更新**。異なる結果が出たら新行（確率的反応を失わない）。
-- 選択: 既存 novelty 項に「(状態,手) 既出回数」の飽和を入れ、カバレッジ（未試行の手・未到達状態）を優先。下手なプレイは許容（合否にしない）。
-- 指標: 重複率 = 既出 (状態,手,結果) の手 / 全手（現状推定 ~55%（状態,手 基準））、新規遷移/分。
-
+## 4. 重複回避（§8 C2: Raw と Aggregate を分離）
+- **Raw Experience / Event Stream**（append-only・潰さない）: 1 手 1 行。turn_id・seq・step・frame ID・取得時刻・手・前後の node・静止判定の根拠（first_change / settled / frames / peak・final ratio）・OCR の layout/text hash・表現版（representation_version）・保持階層（tier）。memory.sqlite の turn（縮小画像 Downscale(4) を既に保持）への参照を持つ。
+- **Aggregated Experience / Index**: 現在の表現（representation_version）で同一と判断した (状態シグネチャ, 手, 結果シグネチャ) を 1 行に集約し count・最初/最後の seq・結果分布を持つ。学習・検索用。
+- **再集約**: 新しい観測器・特徴が入ったら、Raw をリプレイして新しいシグネチャ関数で Aggregate を作り直す（別の representation_version として並存。古い集約は消さない）。
+- 状態シグネチャ（v1）: node（m..|..）＋OCR layout hash（あれば）。自然変化の除外は T3 の注釈を使う将来の v2。
+- 選択への反映（novelty 飽和）は本段では入れない（収集の偏りを先に計測。プレイの上手さは合否にしない）。
+- 指標: 重複率 = 既出 (sig, 手, 結果) の手 / 全手、新規 (sig, 手, 結果)/分、Raw 保持率。
 ## 5. 並列観測器と監督機構へのバス
-- 観測器: FrameDiff・OCR・GT（画面全体仮説）・Entity/Track・自然変化モデル・（音は現状なし。将来の口だけ用意）。
-- 共有バス: 単調時計 `MonoClock` タイムスタンプ＋turn_id＋観測器 ID＋入力フレーム ID の不変メッセージ。
-- 背圧: 観測器ごとに容量制限付きキュー。満杯時は**古いフレーム解析を間引く（最新優先）**が、turn の静止確定フレームは落とさない。間引き数を記録。
-- 順序: turn_id 単位で集約、観測器ごとの deadline（例 OCR 1000 ms, GT 200 ms）。期限切れは「欠損」として Supervisor へ（埋めない）。
-- Supervisor: 既存の FILE_CHANGED 等と同じ口で、観測器の遅延・欠損・キュー長を監視し Health に出す。判断（意味）はしない。
+- 観測器: FrameDiff（静止フレーム対基準）・OCR・自然変化注釈・turn（静止判定）。GT/Entity は既存の観測組立の中（しきい値不変）。音は現状なし（口だけ）。
+- 共有バス `ObserverBus`: すべての結果は `SensorResult`（§7 の必須項目）として投入。単調時計で取得時刻と処理開始/完了を持つ。
+- 背圧: 観測器ごとに容量制限。満杯時に間引けるのは **静止確定でない中間フレームの解析だけ**（`coalesced` として件数と元 frame ID を残す）。静止確定（settle）・基準（pre）フレームの結果は落とさない。
+- deadline: 観測器ごと（OCR 1000 ms・FrameDiff 200 ms・注釈 200 ms）。超過は **late**（落とさない・後から合流）。
+- 順序: 合流は (step, seq, sensor) で整列。完了順ではなく取得時刻順に並べ直して Supervisor へ。同じ観測器で取得時刻が逆転して届いた件数を `reordered` として数える。
+- Supervisor: 観測器ごとの遅延 p50/p90・late・coalesced・queue 最大・対応違反を Health に出す。意味づけはしない。
+## 6. 段階的実装（全フラグ既定 OFF・OFF 時は v0.38.0 と同一経路）
+| 段 | 版 | 内容 | フラグ（環境変数=1） | 成功基準（すべて FAIL 0） |
+|---|---|---|---|---|
+| T0 | v0.39.0 | 区間計測 `step_timing`（決定/送出/静止/記録/観測待ち/後処理） | `GKK_STEP_TIMING` | 区間合計が手の間隔と ±5% |
+| T1 | v0.39.1 | 非同期 Observation 契約＋OCR パイプライン＋`ObservationLedger` | `GKK_PIPELINE_SENSING` | ≥60 手/分、対応違反 0、pending 未解決率 0%、late-amend 成功率 100% |
+| T2 | v0.39.2 | 画面ごとの適応的静止判定（no-change 待ちのみ。StableMs・差分基準不変） | `GKK_ADAPTIVE_SETTLE` | 静止待ち中央値 ≤400 ms、late_change 率 ≤ 5%（既存 WARN 基準）かつ v0.38 実測 1.5% を大きく超えない |
+| T3 | v0.39.3 | 自然変化モデル（セルごとの揺れ・周期。注釈のみ） | `GKK_NATURAL_NOISE_MODEL` | 注釈率・入力起因候補率を表示、学習経路不変 |
+| T4 | v0.39.4 | Raw/Aggregate 分離ストア `experience-raw-agg.sqlite`・再集約 | `GKK_RAW_AGG_SPLIT` | Raw 保持率 100%、重複率表示、再集約で件数一致 |
+| T5 | v0.39.5 | 並列観測器バス→Supervisor | `GKK_PARALLEL_OBSERVERS` | 75–90 手/分（T1+T2 併用時）、settle 結果の間引き 0、deadline 超過は late として 100% 合流 |
 
-## 6. 段階的実装計画（全フラグ既定 OFF）
-| 段 | 内容 | フラグ | 成功基準 |
-|---|---|---|---|
-| T0 | 区間計測の追加（入力送出/静止/OCR/組立/DB を turn に ms で記録）。挙動変化なし | 常時（ログのみ） | 実機で区間合計が間隔と ±5% 一致、FAIL 0 |
-| T1 | 観測バス＋OCR の非同期化（パイプライン） | `pipeline_sensing` | ≥60 手/分、欠損で決めた手の割合を表示、FAIL 0 |
-| T2 | 適応的静止判定 ASW | `adaptive_settle` | 静止待ち中央値 ≤400 ms、late_change 率 ≤ 現状（7/458=1.5%）、FAIL 0 |
-| T3 | 自然変化モデル（注釈のみ） | `natural_change_model` | 入力なし基準 ≥9/10、手と区別できない組の比率低下、FAIL 0 |
-| T4 | 状態シグネチャ・保存一度＋count | `dedup_store` | 重複率の可視化・新規遷移/分 増、DB 増加率低下、FAIL 0 |
-| T5 | 観測器並列（GT/Entity/FrameDiff）＋背圧・deadline | `parallel_observers` | 75–90 手/分、deadline 超過 <2%、FAIL 0 |
+最初の実機確認は T0 単独 → T0+T1 → T0+T1+T2 → 全部、の順で比較する。
 
-最初の一歩: **T0（区間計測）**。理由: 現在の内訳は差分推定（入力送出 ~100 ms・組立 ~76 ms）を含むため、直接計測にしてから T1 を判断する。挙動を変えないので安全。
+## 7. 必須条件 C1: 非同期 Sensor でも因果系列を失わない
+### 7.1 SensorResult（全観測器の結果の必須項目）
+| 項目 | 意味 |
+|---|---|
+| `frame_id` | 元 Frame / Observation ID |
+| `capture_ms` | フレームの取得時刻（単調時計） |
+| `step` / `seq` | 対応する Action（この実行の手番号・学習 DB の seq） |
+| `position` | Action に対するフレームの位置: `pre`（入力前の基準）/ `post`（入力後の途中）/ `settle`（静止確定）/ `gap`（手と手の間の入力なし区間） |
+| `sensor` | 観測器の種別（ocr / frame_diff / noise / turn …） |
+| `start_ms` / `finish_ms` | 処理開始・完了（単調時計） |
+| `provenance` | `observed`（その手の決定前に完成）/ `inherited`（変化なしで前の結果を継承）/ `pending`（未完）/ `late`（後の手の実行後に完成し元の時間軸へ追補）/ `missing`（一度も作られなかった） |
+### 7.2 契約
+1. 1 Action = 1 Complete Observation を捨てず **「1 Action = 1 Observation（後から完成可）」** に拡張。Action 時点では一部 pending を許す。
+2. 結果の帰属は常に `capture_ms` と `step/seq/frame_id`。`finish_ms` は遅延の計測にだけ使う。
+3. 台帳 `ObservationLedger` が (step, sensor) を開き、結果の frame_id/seq が開いた時と一致しなければ **対応違反**（Health FAIL）。
+4. deadline 超過は late（合流待ち）。実行終了時に未完のものは drain で回収。回収後も残るもの＝`pending_unresolved`（WARN>0）。例外で作られなかったものだけ missing。
+5. 「OCR of frame F123 captured after action A1」= `sensor_result{sensor:ocr, frame_id:123, step:1, position:settle, provenance:late}` として記録され、観測（`observation` / memory の observation 行）は元の step・seq で保存される。
+
+## 8. 必須条件 C2: 重複削減と Raw の再解釈可能性の分離
+- §4 のとおり Raw（append-only）と Aggregate（表現版ごと）を分離。Aggregate は Raw からいつでも再生成可能で、Aggregate の削除・作り直しで情報は失われない。
+- ディスク対策の選択肢と失う再解釈能力（本版は Raw 全件保持・縮小画像は既存 memory 側。対策は未実施で明示のみ）:
+
+| 方式 | 容量 | 失う再解釈能力 |
+|---|---|---|
+| 全フレーム原寸保存 | 最大 | なし |
+| 静止確定フレームのみ原寸（現状に近い: memory は Downscale(4)） | 中 | 中間フレーム（アニメの途中・最初の変化の形）。細かい文字の再 OCR は縮小で不可 |
+| keyframe＋差分ブロック | 中〜小 | 差分しきい値未満の微小変化（後の観測器が微小変化を使うと再解析不能） |
+| 可逆圧縮（PNG/zstd） | 小 | なし（CPU のみ） |
+| 非可逆圧縮 | 小 | 画素ジッタ・模様の揺れのモデル化（T3 の再学習）が不正確に |
+| 保持階層（hot 全件 → warm keyframe → cold 特徴のみ） | 最小 | cold 化した経験は新しい画素特徴での再解析不能（記号層の再集約のみ可） |
+| 重要経験の長期保存（新規 sig・驚き大・予測外れ・late_change） | ― | 重要でないと判定された経験の画素根拠（判定は現在の表現に依存する点を明示） |
+
+## 9. 真の throughput 指標と回帰
+- **CIO/min（因果保持観測/分）**: 対応違反なく、complete（observed/inherited）または late-amend 済みの観測数 / 分。主指標。
+- **Raw 保持率**: Raw 行数 / 手数（目標 100%）。
+- **late-amend 成功率**: late で合流できた件数 / late 件数（目標 100%）。
+- **pending 未解決率**: drain 後も pending / 手数（目標 0）。
+- **decided_with_pending 率**: 前の観測が未完のまま決めた手の割合（情報量の代償として表示）。
+- 参考: actions/min、重複率、noise 注釈率、late_change 率。
+- 回帰（テストで固定）: (a) フラグ OFF で各部品が既存経路と同値、(b) 予測: late でも観測に渡す世界予測は開始時の値、(c) 因果: 帰属は capture 時刻、(d) Replay: Raw から Aggregate を再生成して件数一致、(e) 継続学習: memory への CommitTurn は不変、(f) Outer Self-Improvement: 既存 S7 の評価入力（ログ・DB）を削らない。Prediction/Causality/Replay/Continual Learning/Outer の情報品質を落とす変更は採用しない。
