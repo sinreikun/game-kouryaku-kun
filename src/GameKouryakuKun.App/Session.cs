@@ -682,6 +682,8 @@ public sealed class PlaySession
         var stepTiming = GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming ? new GameKouryakuKun.Core.Throughput.StepTiming() : null;   // T0
         StepTimingRef = stepTiming;
         Ledger = GameKouryakuKun.Core.Throughput.ThroughputFlags.LedgerActive ? new GameKouryakuKun.Core.Throughput.ObservationLedger() : null;   // T1/T5: 非同期 Observation 契約
+        var settleAdapt = GameKouryakuKun.Core.Throughput.ThroughputFlags.AdaptiveSettle ? new GameKouryakuKun.Core.Throughput.AdaptiveSettle() : null;   // T2
+        string? prevSettleKey = null; double prevSettleUsed = 0; bool prevSettleShort = false;
         _pendingObs = null; RawCommitted = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）
         var background = new BackgroundActivityBook();
@@ -968,6 +970,7 @@ public sealed class PlaySession
             {
                 LateChanges++;
                 adapt.AddLateChange(detOpt.NoChangeTimeoutMs);
+                if (settleAdapt != null && prevSettleKey != null) settleAdapt.LateChange(prevSettleKey, prevSettleUsed, prevSettleShort);
                 _env.Log.Write("late_change", ("step", step - 1), ("nochange_ms", Math.Round(detOpt.NoChangeTimeoutMs)));
             }
             // 入力なしの変化（v0.14.1。v0.15.0 で NoInputGate に切り出し、学習 DB に記録）: 前の手の結果の画面から、次の入力の直前までに画面が変わっていた。
@@ -1028,10 +1031,22 @@ public sealed class PlaySession
             if (waiting) WaitTurns++;
             det.Mask = turnMask;
             det.Criteria = background.CriteriaFor(motionKey, calib.Criteria);   // その画面のふだんの動きの量まで静止の基準を緩める（学んだ画面だけ）
+            if (settleAdapt != null)
+            {
+                // T2: 変えるのは no-change の待ちだけ（StableMs・差分の基準・上限はそのまま）。待つ手は全体の値（入力なしの観測を短くしない）
+                double nc = waiting ? detOpt.NoChangeTimeoutMs : settleAdapt.Recommend(motionKey, detOpt.NoChangeTimeoutMs, detOpt.StableMs);
+                det.Options = det.Options with { NoChangeTimeoutMs = nc };
+                prevSettleKey = motionKey; prevSettleUsed = nc; prevSettleShort = nc < detOpt.NoChangeTimeoutMs;
+            }
             det.Begin(baseline, receipt.DownAtMs, waiting ? "wait" : action.Describe());
             bool ocrBusyAtTurn = Volatile.Read(ref _ocrBusy) != 0;   // v0.27.2: 文字の読み取り中の手かどうか（画面の取り込み・静止の判定の遅れの比較）
             var b = TurnRunner.Await(det, baseline.Id, cap.WaitForNewFrame, () => MonoClock.Now, PauseReasonNow);
             stepTiming?.Mark("settle", MonoClock.Now);
+            if (settleAdapt != null && b.Kind != TurnKind.Aborted)
+            {
+                if (!waiting && b.FirstChangeMs is double sfc) settleAdapt.ObserveFirstChange(motionKey, sfc);
+                if (b.Kind == TurnKind.NoChange && prevSettleShort) settleAdapt.ShortenedNoChange(motionKey);
+            }
             if (b.Kind != TurnKind.Aborted) Ocr2.TurnTiming(ocrBusyAtTurn, b.BoundaryMs, prevAfter == null ? double.NaN : baseline.TimestampMs - prevAfter.TimestampMs);
             if (b.Kind == TurnKind.Timeout) TimeoutTurns++;
             if (b.Kind == TurnKind.Aborted) AbortedTurns++;
@@ -1347,6 +1362,9 @@ public sealed class PlaySession
             Changed?.Invoke();
         }
         foreach (var bk in _inputs) bk.ReleaseAll();
+        if (settleAdapt != null)
+            _env.Log.Write("adaptive_settle_summary", ("applied", settleAdapt.Applied), ("reverted", settleAdapt.Reverted), ("short_nochange", settleAdapt.ShortNoChange),
+                ("late_on_short", settleAdapt.LateOnShort), ("late_rate", Math.Round(settleAdapt.LateRate, 4)), ("screens", settleAdapt.ScreensSummary()));
         if (_pendingObs != null) { try { _pendingObs.GetAwaiter().GetResult(); } catch (Exception e) { _env.Log.Write("observation_failed", ("step", Step), ("error", e.Message)); } _pendingObs = null; }   // drain（§7.2-4）
         if (Ledger != null)
         {
