@@ -192,10 +192,24 @@ public static class ThroughputComparison
             }
             if (regs.Count > 0) res.Add(new(lab, Verdict.Reject, "品質の後退", gains[0], gains[1], regs));
             else if (!paired) res.Add(new(lab, Verdict.Inconclusive, "対になる区間が足りない（途中で止まった）", gains[0], gains[1], regs));
+            else if (gains.All(g => g >= AdoptMinGain) && SameKeyWeights(xs, segs) is var sw && sw.Min() < StratMinWeight)
+                res.Add(new(lab, Verdict.Inconclusive, $"速さは増えたが、同じ (画面, 手) どうしの照合が足りない（実効 {sw[0]:0}・{sw[1]:0} 件 < {StratMinWeight:0}）。訪れた画面の違いで速さが変わるため採用と言えない", gains[0], gains[1], regs));
             else if (gains.All(g => g >= AdoptMinGain)) res.Add(new(lab, Verdict.Adopt, $"両ブロックで因果保持観測/分が {AdoptMinGain:P0} 以上増加・品質の後退なし", gains[0], gains[1], regs));
             else res.Add(new(lab, Verdict.Inconclusive, $"増加が両ブロックで {AdoptMinGain:P0} に届かない／向きがそろわない", gains[0], gains[1], regs));
         }
         return res;
+    }
+
+    // v0.40.2: 採用には各ブロックで同じ (画面, 手) の照合が必要（画面の違いによる見かけの速さを除く）
+    private static double[] SameKeyWeights(List<SegmentResult> xs, IReadOnlyList<SegmentResult> segs)
+    {
+        var w = new double[2];
+        for (int blk = 1; blk <= 2; blk++)
+        {
+            var x = xs.FirstOrDefault(s => s.Block == blk); var a = segs.FirstOrDefault(s => s.Label == "A" && s.Block == blk && !s.Fail);
+            w[blk - 1] = x == null || a == null ? 0 : StratifiedNoChangeDiff(x, a).Weight;
+        }
+        return w;
     }
 
     private static string V(Verdict v) => v switch { Verdict.Adopt => "採用（推奨）", Verdict.Reject => "不採用", _ => "判定保留" };
@@ -232,7 +246,7 @@ public static class ThroughputComparison
             var (sd, sw) = StratifiedSettleDiff(x, a); var (nd, ns, nw) = StratifiedNoChangeDiff(x, a); var (hd, hs, hw) = StratifiedHitDiff(x, a);
             sb.AppendLine($"| {x.Label} | {x.Block} | {nw:0} | {(double.IsNaN(sd) ? "-" : sd.ToString("+0;-0"))} | {(double.IsNaN(nd) ? "-" : $"{nd:+0.0%;-0.0%}±{ns:0.0%}")} | {(double.IsNaN(hd) ? "-" : $"{hd:+0.0%;-0.0%}±{hs:0.0%}")} |");
         }
-        foreach (var x in segs.Where(s => s.ReadyGapSummary.Length > 0).TakeLast(1)) sb.AppendLine($"- 入力の前の間（最後の区間の時点）: {x.ReadyGapSummary}");
+        foreach (var x in segs.Where(s => s.ReadyGapSummary.Length > 0)) sb.AppendLine($"- 入力の前の間（区間 {x.Index} {x.Label}・学びは持ち越し）: {x.ReadyGapSummary}");
         sb.AppendLine();
         sb.AppendLine("## 判定（基準 A と同じブロックで対にして比較）");
         foreach (var v in vs)

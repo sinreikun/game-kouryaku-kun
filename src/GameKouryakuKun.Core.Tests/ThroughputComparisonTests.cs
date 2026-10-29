@@ -12,6 +12,7 @@ public class ThroughputComparisonTests : IDisposable
     {
         Label = l, Block = blk, Index = idx, Actions = 200, ActionsPerMinute = cio, CioPerMinute = cio, Violations = viol, Opened = 200,
         MemoryCommits = (long)(200 * commit), ObservationsSaved = 200, DecisionsRecorded = 200, WorldChecked = 100, WorldHits = 50, TextPairs = 190,
+        KeyTurns = new Dictionary<string, (long, long, double)> { ["m1\u241fa"] = (100, 10, 50000) },
     };
 
     [Fact]
@@ -145,5 +146,16 @@ public class ThroughputComparisonTests : IDisposable
         l.Complete(3, "ocr", 3, 3, 0, 1); l.Fail(3, "noise", 1, "x");   // missing を含む手は因果保持に数えない
         Assert.Equal(2, l.CausallyIntact);
         Assert.Equal(9, l.CausallyIntactResults);
+    }
+
+    [Fact]
+    public void Adopt_requires_same_screen_evidence_v0402_real_run()
+    {
+        // v0.40.2 実機: D は m48、A は m44/m1/m42 だけを訪れ、同じ (画面, 手) が 0 件なのに「採用」になった
+        SegmentResult Other(string l, int b, double c) => S(l, b, c) with { KeyTurns = new Dictionary<string, (long, long, double)> { ["m48\u241fa"] = (100, 10, 8000) } };
+        var segs = new List<SegmentResult> { S("A", 1, 35), Other("D", 1, 53), Other("D", 2, 39), S("A", 2, 30) };
+        var v = ThroughputComparison.Judge(segs).Single(x => x.Label == "D");
+        Assert.Equal(ThroughputComparison.Verdict.Inconclusive, v.Verdict);
+        Assert.Contains("同じ (画面, 手)", v.Reason);
     }
 }
