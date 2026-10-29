@@ -127,3 +127,15 @@ Health「読み取り中の手 0」= OCR は**毎手直列で完了を待って�
 - **decided_with_pending 率**: 前の観測が未完のまま決めた手の割合（情報量の代償として表示）。
 - 参考: actions/min、重複率、noise 注釈率、late_change 率。
 - 回帰（テストで固定）: (a) フラグ OFF で各部品が既存経路と同値、(b) 予測: late でも観測に渡す世界予測は開始時の値、(c) 因果: 帰属は capture 時刻、(d) Replay: Raw から Aggregate を再生成して件数一致、(e) 継続学習: memory への CommitTurn は不変、(f) Outer Self-Improvement: 既存 S7 の評価入力（ログ・DB）を削らない。Prediction/Causality/Replay/Continual Learning/Outer の情報品質を落とす変更は採用しない。
+
+## 10. 実装状況（v0.39.5 時点）
+| 段 | 版 | 主な部品 | ログ／Health |
+|---|---|---|---|
+| T0 | v0.39.0 | `Core/Throughput/StepTiming`・`ThroughputFlags` | `step_timing`・`step_timing_summary`／「手の速さ」 |
+| T1 | v0.39.1 | `SensorResult`・`ObservationLedger`・`ThroughputMetrics`・Session の pending/drain・世界予測の固定 | `sensor_result`・`ledger_summary`／対応違反 FAIL・未解決 WARN・真の throughput |
+| T2 | v0.39.2 | `AdaptiveSettle`（no-change のみ・遅れた変化で戻す＋下限を上げる） | `adaptive_settle_summary`／早すぎた割合 >5% WARN |
+| T3 | v0.39.3 | `NaturalNoiseModel`（区画の率・周期。注釈のみ） | `noise_annotation`・`noise_summary` |
+| T4 | v0.39.4 | `RawExperience`・`AggregateIndex`・`RawAggStore`（experience-raw-agg.sqlite） | `raw_agg_summary`／リプレイ不一致 FAIL |
+| T5 | v0.39.5 | `ObserverBus`（frame_diff・noise・noise_gap・ocr） | `observer_bus`／静止確定の間引き FAIL |
+
+回帰テスト: `ThroughputRegressionTests`（OFF 時の 1 手 1 完全観測・観測の順序・予測の固定・CommitTurn 不変・適応は no-change だけ・ノイズは注釈のみ）と `ThroughputT0〜T5Tests`。

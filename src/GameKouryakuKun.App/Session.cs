@@ -684,6 +684,7 @@ public sealed class PlaySession
         var stepTiming = GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming ? new GameKouryakuKun.Core.Throughput.StepTiming() : null;   // T0
         StepTimingRef = stepTiming;
         Ledger = GameKouryakuKun.Core.Throughput.ThroughputFlags.LedgerActive ? new GameKouryakuKun.Core.Throughput.ObservationLedger() : null;   // T1/T5: 非同期 Observation 契約
+        Bus = GameKouryakuKun.Core.Throughput.ThroughputFlags.ParallelObservers && Ledger != null ? new GameKouryakuKun.Core.Throughput.ObserverBus(Ledger, () => MonoClock.Now) : null;   // T5
         var settleAdapt = GameKouryakuKun.Core.Throughput.ThroughputFlags.AdaptiveSettle ? new GameKouryakuKun.Core.Throughput.AdaptiveSettle() : null;   // T2
         string? prevSettleKey = null; double prevSettleUsed = 0; bool prevSettleShort = false;
         NoiseModel = GameKouryakuKun.Core.Throughput.ThroughputFlags.NaturalNoise ? new GameKouryakuKun.Core.Throughput.NaturalNoiseModel() : null;   // T3（注釈のみ）
@@ -986,7 +987,7 @@ public sealed class PlaySession
                 else natural.ObserveAfterAction(curNode, gap.NetChanged);
             }
             if (NoiseModel != null && prevAfter != null && prevAfter.Width == baseline.Width && prevAfter.Height == baseline.Height)
-                ObserveNoise(motionKey, prevAfter, baseline, detOpt.Diff, step, GameKouryakuKun.Core.Throughput.FramePosition.Gap, natural: true);
+            { int stepGap = step; RunObserver("noise_gap", step, nextSeq, baseline, GameKouryakuKun.Core.Throughput.FramePosition.Gap, (k, a, c, d) => ObserveNoise(k, a, c, d, stepGap, GameKouryakuKun.Core.Throughput.FramePosition.Gap, natural: true), motionKey, prevAfter, detOpt.Diff); }
             if (gap.Changed && prevAfter != null)
             {
                 NoInputChanges++;
@@ -1122,7 +1123,17 @@ public sealed class PlaySession
             }
             stepTiming?.Mark("commit", MonoClock.Now);
             if (NoiseModel != null && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
-                ObserveNoise(motionKey, baseline, after, detOpt.Diff, step, GameKouryakuKun.Core.Throughput.FramePosition.Settle, natural: waiting);
+            { int stepSet = step; bool waitSet = waiting; RunObserver("noise", step, nextSeq, after, GameKouryakuKun.Core.Throughput.FramePosition.Settle, (k, a, c, d) => ObserveNoise(k, a, c, d, stepSet, GameKouryakuKun.Core.Throughput.FramePosition.Settle, natural: waitSet), motionKey, baseline, detOpt.Diff); }
+            if (Bus != null && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
+            {
+                // T5: 静止確定フレーム対基準の差分の観測器（並列。結果は台帳で元の手に合流）
+                var fdBase = baseline; var fdAfter = after; var fdOpt = detOpt.Diff;
+                Bus.Submit("frame_diff", step, nextSeq, after.Id, after.TimestampMs, GameKouryakuKun.Core.Throughput.FramePosition.Settle, () =>
+                {
+                    var d = FrameDiff.Compare(fdBase, fdAfter, fdOpt, null);
+                    return $"ratio={d.ChangedRatio:0.####} blocks={(d.ChangedBlocks?.Count(x => x) ?? 0)}";
+                });
+            }
             var item = new TurnLogItem(DateTime.Now, step, ca.Name, action.Describe(), reason, b.Kind, b.BoundaryMs, b.FirstChangeMs, b.NetChange, b.Note, baseline.Id, baseline.Width, baseline.Height, turnId, node2);
             Last = item;
             Turn?.Invoke(item);
@@ -1395,6 +1406,7 @@ public sealed class PlaySession
         if (settleAdapt != null)
             _env.Log.Write("adaptive_settle_summary", ("applied", settleAdapt.Applied), ("reverted", settleAdapt.Reverted), ("short_nochange", settleAdapt.ShortNoChange),
                 ("late_on_short", settleAdapt.LateOnShort), ("late_rate", Math.Round(settleAdapt.LateRate, 4)), ("screens", settleAdapt.ScreensSummary()));
+        if (Bus != null) { Bus.Drain(); _env.Log.Write("observer_bus", ("settle_dropped", Bus.SettleDropped), ("coalesced", Bus.Coalesced), ("late", Bus.Late), ("reordered", Bus.Reordered), ("waited", Bus.Waited), ("sensors", Bus.SensorsSummary())); }
         if (_pendingObs != null) { try { _pendingObs.GetAwaiter().GetResult(); } catch (Exception e) { _env.Log.Write("observation_failed", ("step", Step), ("error", e.Message)); } _pendingObs = null; }   // drain（§7.2-4）
         if (Ledger != null)
         {
@@ -1891,9 +1903,18 @@ public sealed class PlaySession
     private readonly HashSet<string> _boundaryStates = new(StringComparer.Ordinal);
     public GameKouryakuKun.Core.Throughput.StepTiming? StepTimingRef { get; private set; }
     public GameKouryakuKun.Core.Throughput.ObservationLedger? Ledger { get; private set; }
+    public GameKouryakuKun.Core.Throughput.ObserverBus? Bus { get; private set; }
     private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
     public long RawCommitted;
     public GameKouryakuKun.Core.Throughput.NaturalNoiseModel? NoiseModel { get; private set; }
+    /// <summary>T3/T5: 観測器を動かす。バスがあれば並列（台帳で元の手・フレームに合流）、なければその場で</summary>
+    private void RunObserver(string sensor, int step, long seq, GameKouryakuKun.Core.Imaging.Frame frame, GameKouryakuKun.Core.Throughput.FramePosition pos,
+        Action<string, GameKouryakuKun.Core.Imaging.Frame, GameKouryakuKun.Core.Imaging.Frame, GameKouryakuKun.Core.Imaging.DiffOptions> work,
+        string key, GameKouryakuKun.Core.Imaging.Frame from, GameKouryakuKun.Core.Imaging.DiffOptions diff)
+    {
+        if (Bus == null) { work(key, from, frame, diff); return; }
+        Bus.Submit(sensor, step, seq, frame.Id, frame.TimestampMs, pos, () => { work(key, from, frame, diff); return key; });
+    }
     /// <summary>T3: 区画の変化を自然変化のモデルに入れる（入力なし）か、注釈する（入力の手）。観測・学習は変えない</summary>
     private void ObserveNoise(string key, GameKouryakuKun.Core.Imaging.Frame a, GameKouryakuKun.Core.Imaging.Frame b, GameKouryakuKun.Core.Imaging.DiffOptions diff, int step,
         GameKouryakuKun.Core.Throughput.FramePosition pos, bool natural)
@@ -1926,6 +1947,7 @@ public sealed class PlaySession
     private void LogSensor(GameKouryakuKun.Core.Throughput.SensorResult? r)
     {
         if (r == null) return;
+        if (r.Sensor == "ocr") Bus?.Publish(r);   // バスの観測器の結果は Submit の中で載る
         _env.Log.Write("sensor_result", ("step", r.Step), ("seq", r.Seq), ("frame_id", r.FrameId), ("capture_ms", Math.Round(r.CaptureMs, 1)), ("position", GameKouryakuKun.Core.Throughput.SensorResult.Name(r.Position)),
             ("sensor", r.Sensor), ("start_ms", Math.Round(r.StartMs, 1)), ("finish_ms", Math.Round(r.FinishMs, 1)), ("provenance", GameKouryakuKun.Core.Throughput.SensorResult.Name(r.Provenance)), ("detail", r.Detail));
     }

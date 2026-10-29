@@ -55,6 +55,7 @@ public sealed class ObservationLedger
     {
         lock (_lock)
         {
+            if (_open.ContainsKey((step, sensor))) Violations++;   // 同じ手・同じ観測器を二重に開いた（前の結果の対応を壊す）
             _open[(step, sensor)] = new Entry { FrameId = frameId, CaptureMs = captureMs, Seq = seq, Position = pos, OpenedMs = nowMs };
             Opened++;
         }
