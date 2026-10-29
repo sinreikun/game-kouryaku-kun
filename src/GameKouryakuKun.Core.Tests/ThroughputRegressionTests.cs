@@ -19,14 +19,16 @@ public class ThroughputRegressionTests
     public void Flags_off_keeps_one_action_one_complete_observation()
     {
         var s = Session();
-        Assert.Contains("if (GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing) _pendingObs = obsTask;\n            else obsTask.GetAwaiter().GetResult();", s.Replace("\r\n", "\n"));
+        // v0.41.0: 手ごとの設定（交互でなければ実行全体のフラグそのもの）
+        Assert.Contains("if (_stepCfg.PipelineSensing) { _pendingObs = obsTask; _pendingObsStep = step; }\n            else obsTask.GetAwaiter().GetResult();", s.Replace("\r\n", "\n"));
+        Assert.Contains("_stepCfg = new GameKouryakuKun.Core.Throughput.ThroughputFlags.FlagSet(\"run\", GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming, GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing", s);
     }
 
     [Fact]
     public void Previous_observation_is_completed_before_next_observation_starts()
     {
         var s = Session();
-        int wait = s.IndexOf("if (_pendingObs != null) { _pendingObs.GetAwaiter().GetResult(); _pendingObs = null; }", StringComparison.Ordinal);
+        int wait = s.IndexOf("double pw0 = MonoClock.Now; _pendingObs.GetAwaiter().GetResult(); _pendingObs = null;", StringComparison.Ordinal);
         int start = s.IndexOf("var obsTask = ReadTextEachStep(", StringComparison.Ordinal);
         Assert.True(wait > 0 && start > wait, "前の手の観測の回収が次の観測の開始より前にない（文字の差分の順序が壊れる）");
         Assert.Contains("// drain（§7.2-4）", s);

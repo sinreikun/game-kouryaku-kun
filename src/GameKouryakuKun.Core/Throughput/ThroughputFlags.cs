@@ -29,6 +29,8 @@ public static class ThroughputFlags
     public sealed record FlagSet(string Label, bool StepTiming, bool PipelineSensing, bool AdaptiveSettle, bool NaturalNoise, bool RawAggSplit, bool ParallelObservers, bool MeasureLedger = true);
 
     public static FlagSet? Override { get; set; }
+    /// <summary>v0.41.0: 手ごとに設定を切り替える比較（設定中は Override をすべて ON にして部品を用意し、各手は割り当てた設定だけを使う）</summary>
+    public static InterleavedComparison? Interleave { get; set; }
     public static bool MeasureLedger { get; private set; }
     public static string? SegmentLabel => Override?.Label;
 

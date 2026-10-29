@@ -872,9 +872,9 @@ public partial class MainWindow : Window
     {
         if (_compareRunning || SessionActive) return;
         _compareRunning = true; _compareCancel = false; UpdatePanels();
-        var segs = new List<GameKouryakuKun.Core.Throughput.SegmentResult>();
-        var failed = new HashSet<string>(StringComparer.Ordinal);
-        int segSec = GameKouryakuKun.Core.Throughput.ThroughputComparison.DefaultSegmentSeconds;
+        var il = new GameKouryakuKun.Core.Throughput.InterleavedComparison();
+        int totalSec = GameKouryakuKun.Core.Throughput.ThroughputComparison.DefaultSegmentSeconds * 8;   // 根拠: v0.40.x と同じ合計 32 分
+        double minutes = 0; string extra = "";
         string started = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         try
         {
@@ -885,48 +885,37 @@ public partial class MainWindow : Window
                 for (int i = 0; i < 120 && (_con == null || _connecting); i++) await Task.Delay(250);   // 根拠: 汎用（接続の探索・取得の確認に数秒〜30 秒）
                 if (_con == null) { MessageBox.Show(this, "ゲームに接続できませんでした。ゲームを起動してからもう一度押してください。", "高速化比較"); return; }
             }
-            _env.Log.Write("throughput_compare", ("phase", "start"), ("segment_seconds", segSec), ("order", "ABCD-DCBA"));
-            AddLog($"[高速化比較] 自動で 8 区間（各 {segSec / 60} 分・ABCD→DCBA）を続けて探索します。終わると比較の報告を入れた診断 zip を書き出します。止めるときは「停止」", LogLevel.Info);
-            foreach (var (idx, block, planned) in GameKouryakuKun.Core.Throughput.ThroughputComparison.Plan())
-            {
-                if (_compareCancel) break;
-                string label = GameKouryakuKun.Core.Throughput.ThroughputComparison.NextLabel(planned, failed);
-                GameKouryakuKun.Core.Throughput.ThroughputFlags.Override = GameKouryakuKun.Core.Throughput.ThroughputComparison.Config(label);
-                string desc = GameKouryakuKun.Core.Throughput.ThroughputComparison.Describe(label) + (label != planned ? $"（{planned} は FAIL のため基準に戻す）" : "");
-                BeginSession(new PlaySessionOptions { AllowSendInput = SendInputCheck.IsChecked == true, MaxSteps = 0, TimeLimitSec = segSec, GrowthTest = GrowthTestCheck.IsChecked == true },
-                    $"[高速化比較] 区間 {idx}/8: {desc}");
-                var s = _session!;
-                await Task.Delay(500);
-                while (s.State != SessionState.Stopped && s.State != SessionState.Idle) await Task.Delay(500);
-                var r = s.LastSegment;
-                if (r != null)
-                {
-                    r = r with { Index = idx, Block = block, EndReason = (label != planned ? $"{planned}→A " : "") + r.EndReason };
-                    segs.Add(r);
-                    if (r.Fail && label != "A") failed.Add(label);
-                    AddLog($"[高速化比較] 区間 {idx}: {r.Actions} 手・{r.ActionsPerMinute:0.0} 手/分・因果保持観測 {r.CioPerMinute:0.0}/分{(r.Fail ? "・FAIL" : "")}", r.Fail ? LogLevel.Warn : LogLevel.Ok);
-                }
-                if (s.EmergencyStopped || s.InputDeliveryFailed) { _compareCancel = true; break; }
-            }
+            // v0.41.0: 1 回の探索の中で、手ごとに設定を A/B/C/D に切り替える（(画面, 手の種類) ごとのブロック無作為化）。
+            // 区間ごとに切り替えると訪れる画面が設定ごとに違い、同じ画面どうしで比べられなかった（実機 v0.40.2）
+            _env.Log.Write("throughput_compare", ("phase", "start"), ("seconds", totalSec), ("design", "interleaved"));
+            AddLog($"[高速化比較] 自動で {totalSec / 60} 分探索し、手ごとに設定 A/B/C/D を切り替えて同じ画面どうしで比べます。終わると比較の報告を入れた診断 zip を書き出します。止めるときは「停止」", LogLevel.Info);
+            GameKouryakuKun.Core.Throughput.ThroughputFlags.Interleave = il;
+            GameKouryakuKun.Core.Throughput.ThroughputFlags.Override = new GameKouryakuKun.Core.Throughput.ThroughputFlags.FlagSet("交互", true, true, true, true, true, true);
+            BeginSession(new PlaySessionOptions { AllowSendInput = SendInputCheck.IsChecked == true, MaxSteps = 0, TimeLimitSec = totalSec, GrowthTest = GrowthTestCheck.IsChecked == true },
+                "[高速化比較] 手ごとに設定を切り替えて探索");
+            var s = _session!;
+            await Task.Delay(500);
+            while (s.State != SessionState.Stopped && s.State != SessionState.Idle) await Task.Delay(500);
+            minutes = s.LastSegment?.Minutes ?? 0;
+            extra = s.LastSegment is { } ls ? $"- 実行全体: {ls.Actions} 手・対応違反 {ls.Violations}・pending 未解決 {ls.PendingUnresolved}・Raw 再集約 {ls.RawReplay}・終わり {ls.EndReason}{(ls.AbortReason != null ? "・打ち切り " + ls.AbortReason : "")}\n- 入力の前の間: {ls.ReadyGapSummary}" : "";
         }
         catch (Exception ex) { AddLog("[高速化比較] 失敗: " + ex.Message, LogLevel.Error); }
         finally
         {
             GameKouryakuKun.Core.Throughput.ThroughputFlags.Override = null;   // 既定（すべて OFF）に戻す。既定値は変えない
+            GameKouryakuKun.Core.Throughput.ThroughputFlags.Interleave = null;
             GameKouryakuKun.Core.Throughput.ThroughputFlags.ApplyEffective();
             _compareRunning = false; UpdatePanels();
         }
-        // 報告を書いて、診断 zip を自動で書き出す（途中で止めても、そこまでの結果で）
         try
         {
-            var vs = GameKouryakuKun.Core.Throughput.ThroughputComparison.Judge(segs);
+            var vs = il.Judge();
             var dir = Path.Combine(_env.DataRoot, AppEnv.ThroughputComparisonDir);
             Directory.CreateDirectory(dir);
             string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-            File.WriteAllText(Path.Combine(dir, $"comparison-{stamp}.md"), GameKouryakuKun.Core.Throughput.ThroughputComparison.Markdown(segs, vs, AppEnv.Version, started, segSec), new System.Text.UTF8Encoding(false));
-            File.WriteAllText(Path.Combine(dir, $"comparison-{stamp}.json"), GameKouryakuKun.Core.Throughput.ThroughputComparison.Json(segs, vs, AppEnv.Version, started, segSec), new System.Text.UTF8Encoding(false));
-            _env.Log.Write("throughput_compare", ("phase", "end"), ("segments", segs.Count), ("cancelled", _compareCancel),
-                ("verdicts", string.Join(" ", vs.Select(v => $"{v.Label}:{v.Verdict}"))));
+            File.WriteAllText(Path.Combine(dir, $"comparison-{stamp}.md"), il.Markdown(AppEnv.Version, started, minutes, extra), new System.Text.UTF8Encoding(false));
+            File.WriteAllText(Path.Combine(dir, $"comparison-{stamp}.json"), il.Json(AppEnv.Version, started, minutes), new System.Text.UTF8Encoding(false));
+            _env.Log.Write("throughput_compare", ("phase", "end"), ("cancelled", _compareCancel), ("verdicts", string.Join(" ", vs.Select(v => $"{v.Label}:{v.Verdict}"))));
             AddLog("[高速化比較] 判定（助言のみ・既定は変えない）: " + string.Join("／", vs.Select(v => $"{v.Label} {v.Verdict}")), LogLevel.Info);
             Export_Click(this, new RoutedEventArgs());
         }

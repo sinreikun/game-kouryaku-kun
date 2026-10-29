@@ -121,6 +121,9 @@ public sealed class ObservationLedger
     /// </summary>
     public long CausallyIntact { get { lock (_lock) return _perStep.Count(k => k.Value.Open == 0 && k.Value.Bad == 0 && k.Value.Ok > 0); } }
 
+    /// <summary>v0.41.0: その手の観測が因果を保って完成したか（観測器が 1 つもなければ null）。手ごとの設定の比較で使う</summary>
+    public bool? StepIntact(int step) { lock (_lock) return _perStep.TryGetValue(step, out var v) ? v.Open == 0 && v.Bad == 0 && v.Ok > 0 : null; }
+
     /// <summary>late-amend 成功率: late で合流できた / (late + 未解決)。late も未解決もなければ 1</summary>
     public double LateAmendSuccessRate()
     {

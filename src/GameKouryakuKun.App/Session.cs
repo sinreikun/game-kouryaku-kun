@@ -699,7 +699,10 @@ public sealed class PlaySession
         lock (_keyTurns) _keyTurns.Clear();
         string? prevSettleKey = null; double prevSettleUsed = 0; bool prevSettleShort = false;
         NoiseModel = GameKouryakuKun.Core.Throughput.ThroughputFlags.NaturalNoise ? new GameKouryakuKun.Core.Throughput.NaturalNoiseModel() : null;   // T3（注釈のみ）
-        _pendingObs = null; RawCommitted = 0; RawExtraRows = 0; RawDuplicates = 0; RawAggErrors = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
+        _pendingObs = null; _pendingObsStep = 0; ilPrevStep = 0; ilViol = 0; ilDrop = 0;
+        _stepCfg = new GameKouryakuKun.Core.Throughput.ThroughputFlags.FlagSet("run", GameKouryakuKun.Core.Throughput.ThroughputFlags.StepTiming, GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing, GameKouryakuKun.Core.Throughput.ThroughputFlags.AdaptiveSettle,
+            GameKouryakuKun.Core.Throughput.ThroughputFlags.NaturalNoise, GameKouryakuKun.Core.Throughput.ThroughputFlags.RawAggSplit, GameKouryakuKun.Core.Throughput.ThroughputFlags.ParallelObservers);   // 交互でなければ実行全体の設定
+        RawCommitted = 0; RawExtraRows = 0; RawDuplicates = 0; RawAggErrors = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）
         var background = new BackgroundActivityBook();
         var motion = new MotionMaskBook();
@@ -947,6 +950,19 @@ public sealed class PlaySession
                 }
             }
             var ca = choice.Action;
+            var il = GameKouryakuKun.Core.Throughput.ThroughputFlags.Interleave;
+            if (il != null)
+            {
+                // v0.41.0: 手ごとの設定（(画面, 手の種類) ごとのブロック無作為化）。手に設定のラベルを付ける（経験の出どころ）
+                double nowA = MonoClock.Now;
+                if (ilPrevStep > 0) il.AddDuration(ilPrevStep, nowA - ilPrevAt);
+                string lab = isHuman ? "A" : il.Assign(curNode + "\u241f" + ca.Group);
+                var ncfg = GameKouryakuKun.Core.Throughput.ThroughputComparison.Config(lab);
+                if (Bus != null && _stepCfg.ParallelObservers && !ncfg.ParallelObservers) Bus.Drain();   // 並列の観測器を外す前に、出ている観測をすべて元の手に合流させる
+                _stepCfg = ncfg;
+                if (!isHuman) { il.Begin(step, lab, curNode + "\u241f" + ca.Name, timeLimit > 0 && _runClock.Elapsed.TotalSeconds >= timeLimit / 2.0 ? 2 : 1); _env.Log.Write("interleave_step", ("step", step), ("cfg", lab), ("node", curNode), ("action", ca.Name)); }
+                ilPrevStep = isHuman ? 0 : step; ilPrevAt = nowA;
+            }
             // 手を送る前の予測（次の画面・画面が変わるか・証拠の量と出どころ）
             var prediction = model.Predict(curNode, ca.Name);
             _lastWorldPred = prediction;   // v0.29.5: 構造化した観測の予測の層に並べる
@@ -971,7 +987,7 @@ public sealed class PlaySession
             catch (Exception e) { Emit("点数の内訳の記録に失敗: " + e.Message, LogLevel.Warn); }
             double since = MonoClock.Now - lastBoundaryAt;
             if (since < profile.Input.MinIntervalMs) Thread.Sleep((int)(profile.Input.MinIntervalMs - since));
-            if (readyGap != null && GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing && !ca.IsWait && !isHuman && step > 1)
+            if (readyGap != null && _stepCfg.PipelineSensing && !ca.IsWait && !isHuman && step > 1)
             {
                 // v0.40.2: 速く押すとゲームが入力を受け付けない手が増える（実機 v0.40.0）。同じ (画面, 手) で変化なしが増えないと学んだ間までは待つ
                 double hold = readyGap.HoldFor(MonoClock.Now - lastBoundaryAt, out _);
@@ -1003,7 +1019,7 @@ public sealed class PlaySession
                 if (prevWasWait) natural.ObserveNatural(curNode, baseline.TimestampMs - prevAfter.TimestampMs, gap.NetChanged, gap.Transition && gap.NetChanged, fromWait: false);
                 else natural.ObserveAfterAction(curNode, gap.NetChanged);
             }
-            if (NoiseModel != null && prevAfter != null && prevAfter.Width == baseline.Width && prevAfter.Height == baseline.Height)
+            if (NoiseModel != null && _stepCfg.NaturalNoise && prevAfter != null && prevAfter.Width == baseline.Width && prevAfter.Height == baseline.Height)
             { int stepGap = step; RunObserver("noise_gap", step, nextSeq, baseline, GameKouryakuKun.Core.Throughput.FramePosition.Gap, (k, a, c, d) => ObserveNoise(k, a, c, d, stepGap, GameKouryakuKun.Core.Throughput.FramePosition.Gap, natural: true), motionKey, prevAfter, detOpt.Diff); }
             if (gap.Changed && prevAfter != null)
             {
@@ -1058,7 +1074,7 @@ public sealed class PlaySession
             {
                 // T2: 変えるのは no-change の待ちだけ（StableMs・差分の基準・上限はそのまま）。待つ手は全体の値（入力なしの観測を短くしない）
                 string settleKey = motionKey + "|" + ca.Group;   // v0.40.2: 画面×手の種類
-                double nc = waiting ? detOpt.NoChangeTimeoutMs : settleAdapt.Recommend(settleKey, detOpt.NoChangeTimeoutMs, detOpt.StableMs);
+                double nc = waiting || !_stepCfg.AdaptiveSettle ? detOpt.NoChangeTimeoutMs : settleAdapt.Recommend(settleKey, detOpt.NoChangeTimeoutMs, detOpt.StableMs);
                 det.Options = det.Options with { NoChangeTimeoutMs = nc };
                 prevSettleKey = settleKey; prevSettleUsed = nc; prevSettleShort = nc < detOpt.NoChangeTimeoutMs;
             }
@@ -1131,7 +1147,7 @@ public sealed class PlaySession
                 Emit("memory.sqlite への記録に失敗: " + e.Message, LogLevel.Error);
                 if (++dbErrors >= 3) { StopReason = "記録の失敗が3回続いたため中止"; endReason = "abort"; }
             }
-            if (GameKouryakuKun.Core.Throughput.ThroughputFlags.RawAggSplit && turnId != null && b.Kind != TurnKind.Aborted && node2 != null)
+            if (_stepCfg.RawAggSplit && turnId != null && b.Kind != TurnKind.Aborted && node2 != null)
             {
                 // T4 / C2: Raw は潰さず 1 手 1 行（memory の turn 行への参照と静止判定の根拠）。集約は現在の表現で別に数える
                 try
@@ -1146,9 +1162,9 @@ public sealed class PlaySession
                 catch (Exception e) { RawAggErrors++; _env.Log.Write("raw_agg_failed", ("step", step), ("error", e.Message)); }
             }
             stepTiming?.Mark("commit", MonoClock.Now);
-            if (NoiseModel != null && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
+            if (NoiseModel != null && _stepCfg.NaturalNoise && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
             { int stepSet = step; bool waitSet = waiting; RunObserver("noise", step, nextSeq, after, GameKouryakuKun.Core.Throughput.FramePosition.Settle, (k, a, c, d) => ObserveNoise(k, a, c, d, stepSet, GameKouryakuKun.Core.Throughput.FramePosition.Settle, natural: waitSet), motionKey, baseline, detOpt.Diff); }
-            if (Bus != null && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
+            if (Bus != null && _stepCfg.ParallelObservers && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
             {
                 // T5: 静止確定フレーム対基準の差分の観測器（並列。結果は台帳で元の手に合流）
                 var fdBase = baseline; var fdAfter = after; var fdOpt = detOpt.Diff;
@@ -1255,14 +1271,29 @@ public sealed class PlaySession
             // v0.29.0: この手の観測（文字を含む）を作り終えてから次の手を決める（1 手 = 1 完全な観測）
             // v0.39.1（T1・GKK_PIPELINE_SENSING）: 前の手の観測の完成は、この手の観測を始める前に必ず待つ（文字の差分の順序を保つ）。
             // この手の観測は待たずに次の手へ進む（pending。完成したら元の step/seq/frame に合流＝late-amend。§7 C1）
-            if (_pendingObs != null) { _pendingObs.GetAwaiter().GetResult(); _pendingObs = null; }
+            if (_pendingObs != null)
+            {
+                double pw0 = MonoClock.Now; _pendingObs.GetAwaiter().GetResult(); _pendingObs = null;
+                if (il != null && _pendingObsStep > 0) { double pwd = MonoClock.Now - pw0; il.AddDuration(_pendingObsStep, pwd); il.AddDuration(step, -pwd); }   // 残りの待ちは観測を出した手の設定の時間
+            }
+            int pendPrev = _pendingObsStep; _pendingObsStep = 0;
             var obsTask = ReadTextEachStep(step, curNode, ca.Name, ca.IsWait || isHuman ? (ca.IsWait ? "wait" : "human") : "agent", node2, after, b.BoundaryMs,
                 st.Seq, "v" + vis2, changedNow, natural.Rates(curNode)?.Change);
-            if (GameKouryakuKun.Core.Throughput.ThroughputFlags.PipelineSensing) _pendingObs = obsTask;
+            if (_stepCfg.PipelineSensing) { _pendingObs = obsTask; _pendingObsStep = step; }
             else obsTask.GetAwaiter().GetResult();
             if (b.Kind == TurnKind.NoChange && !waiting) NoChangeJudged++;
             // v0.40.0: 因果の対応が壊れた・静止確定を落とした設定はその場で打ち切る（高速化比較は次の区間で基準へ戻す）
-            if (SegmentAbort == null && ((Ledger?.Violations ?? 0) > 0 || (Bus?.SettleDropped ?? 0) > 0))
+            bool ilAbort = false;
+            if (il != null && ((Ledger?.Violations ?? 0) > ilViol || (Bus?.SettleDropped ?? 0) > ilDrop))
+            {
+                // v0.41.0: 違反の出た手と、まだ合流していなかった前の手の設定を FAIL にして割り当てから外す（A だけなら従来どおり打ち切り）
+                string why = (Ledger?.Violations ?? 0) > ilViol ? $"対応違反 {Ledger!.Violations}" : $"静止確定の間引き {Bus!.SettleDropped}";
+                ilViol = Ledger?.Violations ?? 0; ilDrop = Bus?.SettleDropped ?? 0;
+                var culprits = new[] { il.LabelOf(step), pendPrev > 0 ? il.LabelOf(pendPrev) : null }.Where(x => x != null && x != "A").Distinct().ToList();
+                foreach (var c in culprits) { il.Fail(c!, why); _env.Log.Write("throughput_segment", ("phase", "fail"), ("label", c), ("reason", why), ("step", step)); Emit($"[高速化比較] 設定 {c} で FAIL（{why}）。以後は割り当てない", LogLevel.Warn); }
+                ilAbort = culprits.Count == 0;
+            }
+            if (SegmentAbort == null && (il == null || ilAbort) && ((Ledger?.Violations ?? 0) > 0 || (Bus?.SettleDropped ?? 0) > 0))
             {
                 SegmentAbort = (Ledger?.Violations ?? 0) > 0 ? $"対応違反 {Ledger!.Violations}" : $"静止確定の間引き {Bus!.SettleDropped}";
                 StopReason = "高速化の設定で FAIL（" + SegmentAbort + "）のため、この設定を打ち切り";
@@ -1447,6 +1478,7 @@ public sealed class PlaySession
                 ("late_on_short", settleAdapt.LateOnShort), ("late_rate", Math.Round(settleAdapt.LateRate, 4)), ("screens", settleAdapt.ScreensSummary()));
         if (Bus != null) { Bus.Drain(); _env.Log.Write("observer_bus", ("settle_dropped", Bus.SettleDropped), ("coalesced", Bus.Coalesced), ("late", Bus.Late), ("reordered", Bus.Reordered), ("waited", Bus.Waited), ("sensors", Bus.SensorsSummary())); }
         if (_pendingObs != null) { try { _pendingObs.GetAwaiter().GetResult(); } catch (Exception e) { _env.Log.Write("observation_failed", ("step", Step), ("error", e.Message)); } _pendingObs = null; }   // drain（§7.2-4）
+        if (GameKouryakuKun.Core.Throughput.ThroughputFlags.Interleave is { } ilEnd && Ledger != null) { var lg = Ledger; ilEnd.SetIntact(s => lg.StepIntact(s)); }   // 合流し終えてから手ごとの因果保持を確定
         if (Ledger != null)
         {
             var un = Ledger.Unresolved();
@@ -1958,6 +1990,8 @@ public sealed class PlaySession
     public GameKouryakuKun.Core.Throughput.StepTiming? StepTimingRef { get; private set; }
     public GameKouryakuKun.Core.Throughput.ObservationLedger? Ledger { get; private set; }
     public GameKouryakuKun.Core.Throughput.ObserverBus? Bus { get; private set; }
+    private int _pendingObsStep; private int ilPrevStep; private double ilPrevAt; private long ilViol, ilDrop;
+    private GameKouryakuKun.Core.Throughput.ThroughputFlags.FlagSet _stepCfg = new("off", false, false, false, false, false, false);
     private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
     public long RawCommitted;
     public long WorldChecked, WorldHits, DecisionsRecorded, NoChangeJudged;
@@ -1997,7 +2031,7 @@ public sealed class PlaySession
         Action<string, GameKouryakuKun.Core.Imaging.Frame, GameKouryakuKun.Core.Imaging.Frame, GameKouryakuKun.Core.Imaging.DiffOptions> work,
         string key, GameKouryakuKun.Core.Imaging.Frame from, GameKouryakuKun.Core.Imaging.DiffOptions diff)
     {
-        if (Bus == null) { work(key, from, frame, diff); return; }
+        if (Bus == null || !_stepCfg.ParallelObservers) { work(key, from, frame, diff); return; }
         Bus.Submit(sensor, step, seq, frame.Id, frame.TimestampMs, pos, () => { work(key, from, frame, diff); return key; });
     }
     /// <summary>T3: 区画の変化を自然変化のモデルに入れる（入力なし）か、注釈する（入力の手）。観測・学習は変えない</summary>
@@ -2110,6 +2144,7 @@ public sealed class PlaySession
                 {
                     bool hit = wp.TopNext == after;
                     Interlocked.Increment(ref WorldChecked); if (hit) Interlocked.Increment(ref WorldHits);
+                    GameKouryakuKun.Core.Throughput.ThroughputFlags.Interleave?.Predict(step, before + "\u241f" + action, hit);
                     lock (_worldByNode) { var wk = before + "\u241f" + action; var cur = _worldByNode.GetValueOrDefault(wk); _worldByNode[wk] = (cur.N + 1, cur.Hits + (hit ? 1 : 0)); _worldPSum += wp.Top.Count > 0 ? wp.Top[0].P : 0; }
                     o = o with { Prediction = o.Prediction with { WorldNext = wp.TopNext, WorldP = wp.Top.Count > 0 ? Math.Round(wp.Top[0].P, 4) : null, WorldHit = hit } };
                     Coarse.Observe(before, action, hit, surp);
