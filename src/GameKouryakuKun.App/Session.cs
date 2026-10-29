@@ -684,6 +684,7 @@ public sealed class PlaySession
         Ledger = GameKouryakuKun.Core.Throughput.ThroughputFlags.LedgerActive ? new GameKouryakuKun.Core.Throughput.ObservationLedger() : null;   // T1/T5: 非同期 Observation 契約
         var settleAdapt = GameKouryakuKun.Core.Throughput.ThroughputFlags.AdaptiveSettle ? new GameKouryakuKun.Core.Throughput.AdaptiveSettle() : null;   // T2
         string? prevSettleKey = null; double prevSettleUsed = 0; bool prevSettleShort = false;
+        NoiseModel = GameKouryakuKun.Core.Throughput.ThroughputFlags.NaturalNoise ? new GameKouryakuKun.Core.Throughput.NaturalNoiseModel() : null;   // T3（注釈のみ）
         _pendingObs = null; RawCommitted = 0; _runStartMs = MonoClock.Now; _actionsSent = 0;
         // 画面（の種類）ごとの常時アニメのマスク: 時間切れの手の終わりに動き続けた所を学ぶ（起動時の較正では測れない別の画面の動き）
         var background = new BackgroundActivityBook();
@@ -982,6 +983,8 @@ public sealed class PlaySession
                 if (prevWasWait) natural.ObserveNatural(curNode, baseline.TimestampMs - prevAfter.TimestampMs, gap.NetChanged, gap.Transition && gap.NetChanged, fromWait: false);
                 else natural.ObserveAfterAction(curNode, gap.NetChanged);
             }
+            if (NoiseModel != null && prevAfter != null && prevAfter.Width == baseline.Width && prevAfter.Height == baseline.Height)
+                ObserveNoise(motionKey, prevAfter, baseline, detOpt.Diff, step, GameKouryakuKun.Core.Throughput.FramePosition.Gap, natural: true);
             if (gap.Changed && prevAfter != null)
             {
                 NoInputChanges++;
@@ -1102,6 +1105,8 @@ public sealed class PlaySession
                 if (++dbErrors >= 3) { StopReason = "記録の失敗が3回続いたため中止"; endReason = "abort"; }
             }
             stepTiming?.Mark("commit", MonoClock.Now);
+            if (NoiseModel != null && after != null && b.Kind != TurnKind.Aborted && after.Width == baseline.Width && after.Height == baseline.Height)
+                ObserveNoise(motionKey, baseline, after, detOpt.Diff, step, GameKouryakuKun.Core.Throughput.FramePosition.Settle, natural: waiting);
             var item = new TurnLogItem(DateTime.Now, step, ca.Name, action.Describe(), reason, b.Kind, b.BoundaryMs, b.FirstChangeMs, b.NetChange, b.Note, baseline.Id, baseline.Width, baseline.Height, turnId, node2);
             Last = item;
             Turn?.Invoke(item);
@@ -1362,6 +1367,8 @@ public sealed class PlaySession
             Changed?.Invoke();
         }
         foreach (var bk in _inputs) bk.ReleaseAll();
+        if (NoiseModel != null) _env.Log.Write("noise_summary", ("summary", NoiseModel.Summary()), ("screens_with_baseline", NoiseModel.ScreensWithBaseline), ("screens", NoiseModel.Screens),
+            ("natural", NoiseModel.NaturalCandidates), ("input", NoiseModel.InputCandidates), ("no_baseline", NoiseModel.NoBaseline));
         if (settleAdapt != null)
             _env.Log.Write("adaptive_settle_summary", ("applied", settleAdapt.Applied), ("reverted", settleAdapt.Reverted), ("short_nochange", settleAdapt.ShortNoChange),
                 ("late_on_short", settleAdapt.LateOnShort), ("late_rate", Math.Round(settleAdapt.LateRate, 4)), ("screens", settleAdapt.ScreensSummary()));
@@ -1863,6 +1870,28 @@ public sealed class PlaySession
     public GameKouryakuKun.Core.Throughput.ObservationLedger? Ledger { get; private set; }
     private Task? _pendingObs; private double _runStartMs; private int _actionsSent;
     public long RawCommitted;
+    public GameKouryakuKun.Core.Throughput.NaturalNoiseModel? NoiseModel { get; private set; }
+    /// <summary>T3: 区画の変化を自然変化のモデルに入れる（入力なし）か、注釈する（入力の手）。観測・学習は変えない</summary>
+    private void ObserveNoise(string key, GameKouryakuKun.Core.Imaging.Frame a, GameKouryakuKun.Core.Imaging.Frame b, GameKouryakuKun.Core.Imaging.DiffOptions diff, int step,
+        GameKouryakuKun.Core.Throughput.FramePosition pos, bool natural)
+    {
+        try
+        {
+            var blocks = GameKouryakuKun.Core.Imaging.FrameDiff.Compare(a, b, diff, null).ChangedBlocks;
+            if (blocks == null || NoiseModel == null) return;
+            lock (NoiseModel)
+            {
+                if (natural) NoiseModel.ObserveNatural(key, blocks, b.TimestampMs);
+                else
+                {
+                    var an = NoiseModel.Annotate(key, blocks);
+                    _env.Log.Write("noise_annotation", ("step", step), ("screen", key), ("frame_id", b.Id), ("position", GameKouryakuKun.Core.Throughput.SensorResult.Name(pos)),
+                        ("changed", an.Changed), ("natural", an.Natural), ("input", an.Input), ("no_baseline", an.NoBaseline), ("periodic", an.Periodic));
+                }
+            }
+        }
+        catch (Exception e) { _env.Log.Write("noise_failed", ("step", step), ("error", e.Message)); }
+    }
     public long RawExtraRows;   // T4: Raw ストアの行（memory の turn 行に加えて）
     public GameKouryakuKun.Core.Throughput.ThroughputMetrics CurrentThroughput()
     {
