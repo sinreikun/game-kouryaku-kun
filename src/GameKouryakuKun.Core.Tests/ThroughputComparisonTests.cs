@@ -50,7 +50,7 @@ public class ThroughputComparisonTests : IDisposable
         Assert.True(ThroughputFlags.ParallelObservers);
         Assert.Contains("自動比較 D", ThroughputFlags.StatusText());
         ThroughputFlags.Override = null; ThroughputFlags.ApplyEffective();
-        Assert.False(ThroughputFlags.LedgerActive);   // 終われば既定（すべて OFF）
+        Assert.True(ThroughputFlags.ModeC && ThroughputFlags.PipelineSensing && !ThroughputFlags.ParallelObservers);   // 終われば既定（v0.42.0: C だけ ON）
     }
 
     [Fact]

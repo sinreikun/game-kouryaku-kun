@@ -59,6 +59,11 @@ public static class ThroughputHealth
             else add(Area, "Action→Observation→Result の対応", HealthReport.Level.Warn, $"ledger_summary なし（実行が途中で終わった可能性）・sensor_result {sr.Count}（{provs}）");
         }
 
+        var flags = cur.LastOrDefault(e => T(e) == "throughput_flags");
+        if (flags.ValueKind == JsonValueKind.Object) add(Area, "実行の高速モード", HealthReport.Level.Info, S(flags, "status"));
+        var fb = cur.LastOrDefault(e => T(e) == "throughput_fallback");
+        if (fb.ValueKind == JsonValueKind.Object)
+            add(Area, "高速モードの自動の基準戻し", HealthReport.Level.Fail, $"{S(fb, "reason")}（手 {N(fb, "step")}）のため、実行の残りを基準の経路に戻した");
         var settle = cur.LastOrDefault(e => T(e) == "adaptive_settle_summary");
         if (settle.ValueKind != JsonValueKind.Object) add(Area, "適応的静止判定 (T2)", HealthReport.Level.NotTested, "adaptive_settle_summary なし（GKK_ADAPTIVE_SETTLE OFF）");
         else

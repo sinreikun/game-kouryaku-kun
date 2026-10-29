@@ -9,22 +9,39 @@ namespace GameKouryakuKun.Core.Tests;
 public class ThroughputT0Tests : IDisposable
 {
     private static readonly string[] Envs = { ThroughputFlags.StepTimingEnv, ThroughputFlags.PipelineSensingEnv, ThroughputFlags.AdaptiveSettleEnv,
-        ThroughputFlags.NaturalNoiseEnv, ThroughputFlags.RawAggSplitEnv, ThroughputFlags.ParallelObserversEnv };
-    public ThroughputT0Tests() { foreach (var e in Envs) Environment.SetEnvironmentVariable(e, null); ThroughputFlags.ApplyEffective(); }
+        ThroughputFlags.NaturalNoiseEnv, ThroughputFlags.RawAggSplitEnv, ThroughputFlags.ParallelObserversEnv, ThroughputFlags.ModeCEnv };
+    public ThroughputT0Tests() { ThroughputFlags.UserModeC = true; foreach (var e in Envs) Environment.SetEnvironmentVariable(e, null); ThroughputFlags.ApplyEffective(); }
     public void Dispose() { foreach (var e in Envs) Environment.SetEnvironmentVariable(e, null); ThroughputFlags.ApplyEffective(); }
 
     [Fact]
-    public void All_flags_default_off()
+    public void Defaults_are_mode_c_on_and_others_off_v0420()
     {
         ThroughputFlags.ApplyEffective();
-        Assert.False(ThroughputFlags.StepTiming || ThroughputFlags.PipelineSensing || ThroughputFlags.AdaptiveSettle
-            || ThroughputFlags.NaturalNoise || ThroughputFlags.RawAggSplit || ThroughputFlags.ParallelObservers);
-        Assert.False(ThroughputFlags.LedgerActive);
-        Assert.Contains("OFF（既定", ThroughputFlags.StatusText());
-        foreach (var e in Envs)
+        Assert.True(ThroughputFlags.ModeC && ThroughputFlags.StepTiming && ThroughputFlags.PipelineSensing && ThroughputFlags.AdaptiveSettle);
+        Assert.False(ThroughputFlags.NaturalNoise || ThroughputFlags.RawAggSplit || ThroughputFlags.ParallelObservers);
+        Assert.True(ThroughputFlags.LedgerActive);
+        Assert.Contains("既定 C 高速モード ON", ThroughputFlags.StatusText());
+        // 環境変数 =0 で C を切ると基準の経路（v0.38.0 と同一）
+        Environment.SetEnvironmentVariable(ThroughputFlags.ModeCEnv, "0"); ThroughputFlags.ApplyEffective();
+        Assert.False(ThroughputFlags.StepTiming || ThroughputFlags.PipelineSensing || ThroughputFlags.AdaptiveSettle || ThroughputFlags.LedgerActive);
+        Assert.Contains("OFF（基準", ThroughputFlags.StatusText());
+        Environment.SetEnvironmentVariable(ThroughputFlags.ModeCEnv, null);
+        // 個別に =0
+        Environment.SetEnvironmentVariable(ThroughputFlags.AdaptiveSettleEnv, "0"); ThroughputFlags.ApplyEffective();
+        Assert.True(ThroughputFlags.PipelineSensing); Assert.False(ThroughputFlags.AdaptiveSettle);
+        Environment.SetEnvironmentVariable(ThroughputFlags.AdaptiveSettleEnv, null);
+        // 画面の切り替え
+        ThroughputFlags.UserModeC = false; ThroughputFlags.ApplyEffective();
+        Assert.False(ThroughputFlags.PipelineSensing || ThroughputFlags.AdaptiveSettle);
+        ThroughputFlags.UserModeC = true; ThroughputFlags.ApplyEffective();
+        // 比較の A は C の既定に関係なくすべて OFF
+        ThroughputFlags.Override = ThroughputComparison.Config("A"); ThroughputFlags.ApplyEffective();
+        Assert.False(ThroughputFlags.PipelineSensing || ThroughputFlags.AdaptiveSettle);
+        ThroughputFlags.Override = null; ThroughputFlags.ApplyEffective();
+        foreach (var e in new[] { ThroughputFlags.NaturalNoiseEnv, ThroughputFlags.RawAggSplitEnv, ThroughputFlags.ParallelObserversEnv })
         {
             Environment.SetEnvironmentVariable(e, "1"); ThroughputFlags.ApplyEffective();
-            Assert.DoesNotContain("OFF（既定", ThroughputFlags.StatusText());
+            Assert.True(ThroughputFlags.NaturalNoise || ThroughputFlags.RawAggSplit || ThroughputFlags.ParallelObservers);
             Environment.SetEnvironmentVariable(e, null); ThroughputFlags.ApplyEffective();
         }
     }

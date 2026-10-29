@@ -22,7 +22,7 @@
           <Button x:Name="OcrButton" Content="OCRテスト" Click="Ocr_Click"/>
           <Button x:Name="SetupButton" Content="セットアップ" Click="Setup_Click"/>
           <Button x:Name="ExportButton" Content="診断データを書き出す" Click="Export_Click" ToolTip="DB（使用中でも一貫したコピー）・ログ・部品の導入記録を1つの zip にまとめ、zip ファイルそのものをクリップボードにコピーします（送り先に Ctrl+V で貼り付け）"/>
-          <Button x:Name="ThroughputCompareButton" Content="高速化比較を自動実行（約35分）" Click="ThroughputCompare_Click" ToolTip="ゲームに接続した状態で押すだけ。A 基準・B パイプライン・C 適応的静止判定・D 全部 を ABCD→DCBA の順に 4 分ずつ自動で探索し、比較の報告を入れた診断 zip を書き出してクリップボードにコピーします。既定の設定は変えません。止めるときは「停止」"/>
+          <Button x:Name="ThroughputCompareButton" Content="高速化比較を自動実行（約35分）" Click="ThroughputCompare_Click" ToolTip="ゲームに接続した状態で押すだけ。32 分の探索の中で手ごとに A 基準・B パイプライン・C 適応的静止判定・D 全部 を切り替えて同じ画面どうしで比べ、比較の報告を入れた診断 zip を書き出してクリップボードにコピーします。既定の設定は変えません。止めるときは「停止」"/>
           <Rectangle Width="16"/>
           <TextBlock Text="実行時間" VerticalAlignment="Center" Margin="0,0,4,0"/>
           <ComboBox x:Name="RunMinutesBox" Width="80" VerticalAlignment="Center" Margin="0,0,8,0" SelectedIndex="0" ToolTip="手探り探索を終える時間。「なし」のときは停止ボタン・手数上限で止めます">
@@ -33,6 +33,7 @@
             <ComboBoxItem Content="60分" Tag="3600"/>
           </ComboBox>
           <CheckBox x:Name="SendInputCheck" Content="占有モード(SendInput)を許可"/>
+          <CheckBox x:Name="ModeCCheck" Content="高速モード（C）" IsChecked="True" Margin="8,0,0,0" Checked="ModeC_Changed" Unchecked="ModeC_Changed" ToolTip="既定 ON（v0.42.0）。OCR を待たずに次の手へ進み（文字は後から元の手に合流）、画面ごとに静止の待ちを学んで短くし、ゲームが受け付けるまで入力を待ちます。外すと基準の経路（v0.38.0 と同じ）。次の探索から効きます"/>
           <CheckBox x:Name="GrowthTestCheck" Content="成長テスト（計測を細かく）" Margin="8,0,0,0" ToolTip="長い実行・起動をまたぐ実行の推移を 25 手ごとに記録します（探索の手順は同じ）"/>
           <TextBlock x:Name="MaxStepsLabel" Text="手数上限" VerticalAlignment="Center" Margin="0,0,4,0"/>
           <TextBox x:Name="MaxStepsBox" Width="56" Text="0" VerticalAlignment="Center" ToolTip="0 = 上限なし。実行時間と併用できます（先に来たほうで終わります）"/>

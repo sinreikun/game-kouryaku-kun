@@ -1294,7 +1294,16 @@ public sealed class PlaySession
                 foreach (var c in culprits) { il.Fail(c!, why); _env.Log.Write("throughput_segment", ("phase", "fail"), ("label", c), ("reason", why), ("step", step)); Emit($"[高速化比較] 設定 {c} で FAIL（{why}）。以後は割り当てない", LogLevel.Warn); }
                 ilAbort = culprits.Count == 0;
             }
-            if (SegmentAbort == null && (il == null || ilAbort) && ((Ledger?.Violations ?? 0) > 0 || (Bus?.SettleDropped ?? 0) > 0))
+            if (SegmentAbort == null && il == null && GameKouryakuKun.Core.Throughput.ThroughputFlags.Override == null && ((Ledger?.Violations ?? 0) > 0 || (Bus?.SettleDropped ?? 0) > 0))
+            {
+                // v0.42.0: 普段のプレイ（既定 C）で因果の対応が壊れた・静止確定を落としたら、この実行の残りは基準（パイプライン・適応・並列なし）に戻して続ける。健全性は FAIL
+                SegmentAbort = (Ledger?.Violations ?? 0) > 0 ? $"対応違反 {Ledger!.Violations}" : $"静止確定の間引き {Bus!.SettleDropped}";
+                if (Bus != null) Bus.Drain();
+                _stepCfg = new GameKouryakuKun.Core.Throughput.ThroughputFlags.FlagSet("fallback", _stepCfg.StepTiming, false, false, false, false, false);
+                _env.Log.Write("throughput_fallback", ("reason", SegmentAbort), ("step", step), ("from", GameKouryakuKun.Core.Throughput.ThroughputFlags.StatusText()));
+                Emit("[高速モード] " + SegmentAbort + " のため、この実行の残りは基準の経路に戻します", LogLevel.Warn);
+            }
+            if (SegmentAbort == null && (il == null || ilAbort) && GameKouryakuKun.Core.Throughput.ThroughputFlags.Override != null && ((Ledger?.Violations ?? 0) > 0 || (Bus?.SettleDropped ?? 0) > 0))
             {
                 SegmentAbort = (Ledger?.Violations ?? 0) > 0 ? $"対応違反 {Ledger!.Violations}" : $"静止確定の間引き {Bus!.SettleDropped}";
                 StopReason = "高速化の設定で FAIL（" + SegmentAbort + "）のため、この設定を打ち切り";

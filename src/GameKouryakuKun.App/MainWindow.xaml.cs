@@ -78,6 +78,8 @@ public partial class MainWindow : Window
         _liveTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(66), DispatcherPriority.Render, (_, _) => UpdateLive(), Dispatcher);
         _panelTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(500), DispatcherPriority.Background, (_, _) => UpdatePanels(), Dispatcher);
         _liveTimer.Start(); _panelTimer.Start();
+        try { var mf = Path.Combine(_env.DataRoot, ModeCFile); if (File.Exists(mf) && File.ReadAllText(mf).Trim() == "off") { GameKouryakuKun.Core.Throughput.ThroughputFlags.UserModeC = false; ModeCCheck.IsChecked = false; } } catch { }
+        GameKouryakuKun.Core.Throughput.ThroughputFlags.ApplyEffective();
         Loaded += (_, _) => { LoadLaunchUi(); UpdatePanels(); Connect(); var plan = _env.Components.Plan(); if (plan.Needed.Count > 0) AddLog($"未導入の部品があります（{string.Join("・", plan.Needed.Select(n => n.Spec.DisplayName))}、計 {Setup.ComponentManager.Mb(plan.DownloadBytes)}）。OCR を使うには「セットアップ」から導入してください（Windows 内蔵 OCR は導入なしで使えます）。", LogLevel.Info); };
         Closing += OnClosing;
     }
@@ -920,6 +922,18 @@ public partial class MainWindow : Window
             Export_Click(this, new RoutedEventArgs());
         }
         catch (Exception ex) { AddLog("[高速化比較] 報告の書き出しに失敗: " + ex.Message, LogLevel.Error); }
+    }
+
+    private const string ModeCFile = "throughput-mode.txt";
+    private void ModeC_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        bool on = ModeCCheck.IsChecked == true;
+        GameKouryakuKun.Core.Throughput.ThroughputFlags.UserModeC = on;
+        GameKouryakuKun.Core.Throughput.ThroughputFlags.ApplyEffective();
+        try { File.WriteAllText(Path.Combine(_env.DataRoot, ModeCFile), on ? "on" : "off"); } catch (Exception ex) { AddLog("高速モードの保存に失敗: " + ex.Message, LogLevel.Warn); }
+        _env.Log.Write("throughput_mode_changed", ("mode_c", on));
+        AddLog(on ? "高速モード（C）: ON（次の探索から）" : "高速モード（C）: OFF・基準の経路（次の探索から）", LogLevel.Info);
     }
 
     private async void Export_Click(object sender, RoutedEventArgs e)
